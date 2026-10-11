@@ -1,0 +1,17 @@
+{
+  "name": "cabinet-io",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:client": "npm run dev --workspace=apps/client",
+    "dev:orchestrator": "npm run dev --workspace=apps/orchestrator",
+    "build:client": "npm run build --workspace=apps/client",
+    "build:orchestrator": "npm run build --workspace=apps/orchestrator"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0"
+  }
+}
