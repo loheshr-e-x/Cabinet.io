@@ -1,0 +1,6 @@
+.git
+node_modules
+apps/client/node_modules
+apps/orchestrator/node_modules
+apps/edge-daemon/target
+dist
