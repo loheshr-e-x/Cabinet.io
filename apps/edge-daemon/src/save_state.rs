@@ -28,6 +28,7 @@ impl SaveStateManager {
             "cloudflare-r2",
         );
         let s3_config = config::Builder::new()
+            .behavior_version(config::BehaviorVersion::latest())
             .region(config::Region::new("auto"))
             .credentials_provider(credentials)
             .endpoint_url(r2_endpoint)
