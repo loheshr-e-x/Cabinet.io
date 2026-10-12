@@ -1,10 +1,12 @@
-# Step 1: Build binary using latest official Rust image (supports Rust 2024 edition crates)
-FROM rust:latest AS builder
+# Step 1: Build binary using a Rust version supported by the locked dependencies
+FROM rust:1.94-slim-bookworm AS builder
 WORKDIR /app
 
 # Install build tools and C dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
+    clang \
+    libclang-dev \
     pkg-config \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -12,7 +14,7 @@ RUN apt-get update && apt-get install -y \
 COPY apps/edge-daemon/Cargo.toml apps/edge-daemon/Cargo.lock ./
 COPY apps/edge-daemon/src ./src
 
-RUN cargo build --release
+RUN cargo build --locked --release
 
 # Step 2: Minimal runtime image
 FROM debian:bookworm-slim
