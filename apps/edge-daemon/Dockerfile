@@ -1,5 +1,5 @@
-# Step 1: Build binary using official Rust image supporting Lockfile v4
-FROM rust:1.82-slim AS builder
+# Step 1: Build binary using latest official Rust image (supports Rust 2024 edition crates)
+FROM rust:latest AS builder
 WORKDIR /app
 
 # Install build tools and C dependencies
