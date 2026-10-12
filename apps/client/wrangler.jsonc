@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cabinet-io",
+  "compatibility_date": "2026-10-06",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+  "vars": {
+    "NODE_VERSION": "20",
+    "VITE_ORCHESTRATOR_URL": "https://cabinet-orchestrator.onrender.com"
+  }
+}
