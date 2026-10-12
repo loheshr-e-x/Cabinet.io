@@ -1,5 +1,5 @@
 # Step 1: Build binary using official Rust image
-FROM rust:1.75-slim as builder
+FROM rust:1.75-slim AS builder
 WORKDIR /app
 
 # Install build tools
@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
+COPY apps/edge-daemon/Cargo.toml apps/edge-daemon/Cargo.lock ./
+COPY apps/edge-daemon/src ./src
 
 RUN cargo build --release
 
