@@ -69,6 +69,13 @@ function getAccessToken(): string | null {
   return window.sessionStorage.getItem('cabinet.accessToken');
 }
 
+function hasTouchInput(): boolean {
+  return (
+    window.matchMedia('(pointer: coarse)').matches ||
+    window.matchMedia('(max-width: 768px)').matches
+  );
+}
+
 export function App() {
   const [games, setGames] = useState<GameItem[]>([]);
   const [selectedGame, setSelectedGame] = useState<GameItem | null>(null);
@@ -84,10 +91,16 @@ export function App() {
   const [catalogError, setCatalogError] = useState('');
   const [gamesLoading, setGamesLoading] = useState(false);
   const [notice, setNotice] = useState('');
+  const [isTouchDevice, setIsTouchDevice] = useState(hasTouchInput);
+  const [touchControlsOverride, setTouchControlsOverride] = useState<boolean | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [fullscreenError, setFullscreenError] = useState('');
   const [orchestratorStatus, setOrchestratorStatus] = useState<
     'checking' | 'online' | 'offline'
   >('checking');
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamViewRef = useRef<HTMLElement | null>(null);
+  const touchControlsEnabled = touchControlsOverride ?? isTouchDevice;
 
   const { connectionStatus, dataChannel, remoteStream } = useWebRTCSession({
     sessionId: activeSession?.sessionId ?? null,
@@ -102,6 +115,44 @@ export function App() {
     },
     [remoteStream],
   );
+
+  useEffect(() => {
+    const coarsePointer = window.matchMedia('(pointer: coarse)');
+    const narrowScreen = window.matchMedia('(max-width: 768px)');
+    const update = () => setIsTouchDevice(coarsePointer.matches || narrowScreen.matches);
+    coarsePointer.addEventListener('change', update);
+    narrowScreen.addEventListener('change', update);
+    return () => {
+      coarsePointer.removeEventListener('change', update);
+      narrowScreen.removeEventListener('change', update);
+    };
+  }, []);
+
+  useEffect(() => {
+    const updateFullscreenState = () => {
+      setIsFullscreen(document.fullscreenElement === streamViewRef.current);
+    };
+    document.addEventListener('fullscreenchange', updateFullscreenState);
+    return () => document.removeEventListener('fullscreenchange', updateFullscreenState);
+  }, []);
+
+  const toggleFullscreen = async () => {
+    const streamView = streamViewRef.current;
+    if (!streamView) return;
+
+    setFullscreenError('');
+    try {
+      if (document.fullscreenElement === streamView) {
+        await document.exitFullscreen();
+      } else {
+        await streamView.requestFullscreen();
+      }
+    } catch (error) {
+      setFullscreenError(
+        error instanceof Error ? error.message : 'Could not change fullscreen mode.',
+      );
+    }
+  };
 
   const signOut = () => {
     window.sessionStorage.removeItem('cabinet.accessToken');
@@ -349,11 +400,32 @@ export function App() {
         </header>
 
         {activeSession ? (
-          <section className="stream-view" aria-label="Game stream">
+          <section className="stream-view" aria-label="Game stream" ref={streamViewRef}>
             <div className="stream-header">
-              <button className="button button--quiet" onClick={exitStream}>
-                ← EXIT TO CATALOG
-              </button>
+              <div className="stream-header-actions">
+                <button className="button button--quiet" onClick={exitStream}>
+                  ← EXIT TO CATALOG
+                </button>
+                <ControlsInfo systemCore={activeSession.game.systemCore} />
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  aria-pressed={touchControlsEnabled}
+                  onClick={() =>
+                    setTouchControlsOverride(!touchControlsEnabled)
+                  }
+                >
+                  TOUCH CONTROLS: {touchControlsEnabled ? 'ON' : 'OFF'}
+                </button>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  onClick={() => void toggleFullscreen()}
+                  aria-pressed={isFullscreen}
+                >
+                  {isFullscreen ? 'EXIT FULLSCREEN' : 'FULLSCREEN'}
+                </button>
+              </div>
               <div className="stream-session-meta">
                 <span className="eyebrow">NOW PLAYING</span>
                 <strong>{activeSession.game.title}</strong>
@@ -361,34 +433,40 @@ export function App() {
                   {connectionStatus.replaceAll('-', ' ').toUpperCase()}
                 </span>
               </div>
-            </div>
-            <div className="stream-viewport">
-              <video
-                ref={bindVideoElement}
-                autoPlay
-                playsInline
-                muted
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  minWidth: '320px',
-                  minHeight: '240px',
-                  backgroundColor: '#000',
-                }}
-                aria-label={`${activeSession.game.title} video stream`}
-              />
-              {!remoteStream && (
-                <div className="stream-placeholder" role="status">
-                  <span className="loading-orbit" />
-                  <strong>CONNECTING TO EDGE NODE</strong>
-                  <span>Waiting for the game stream…</span>
-                </div>
+              {fullscreenError && (
+                <p className="stream-error" role="alert">{fullscreenError}</p>
               )}
-              <TouchController setButton={setButton} />
-              <div className="stream-hud" aria-label="Stream diagnostics">
-                <span>INPUT: <strong>{dataChannel?.readyState === 'open' ? 'READY' : 'WAITING'}</strong></span>
-                <span>ICE: <strong>{connectionStatus.toUpperCase()}</strong></span>
+            </div>
+            <div className="stream-player-stage">
+              <div className="stream-viewport">
+                <video
+                  ref={bindVideoElement}
+                  autoPlay
+                  playsInline
+                  muted
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    backgroundColor: '#000',
+                  }}
+                  aria-label={`${activeSession.game.title} video stream`}
+                />
+                {!remoteStream && (
+                  <div className="stream-placeholder" role="status">
+                    <span className="loading-orbit" />
+                    <strong>CONNECTING TO EDGE NODE</strong>
+                    <span>Waiting for the game stream…</span>
+                  </div>
+                )}
+                <div className="stream-hud" aria-label="Stream diagnostics">
+                  <span>INPUT: <strong>{dataChannel?.readyState === 'open' ? 'READY' : 'WAITING'}</strong></span>
+                  <span>ICE: <strong>{connectionStatus.toUpperCase()}</strong></span>
+                </div>
               </div>
+              <TouchController
+                setButton={setButton}
+                enabled={touchControlsEnabled}
+              />
             </div>
           </section>
         ) : (
@@ -432,7 +510,6 @@ export function App() {
                       >
                         + COUCH INVITE
                       </button>
-                      <ControlsInfo systemCore={selectedGame.systemCore} />
                     </div>
                   </div>
                 </article>

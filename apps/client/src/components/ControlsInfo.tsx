@@ -90,7 +90,7 @@ export function ControlsInfo({ systemCore }: ControlsInfoProps) {
         type="button"
         onClick={() => setIsOpen(true)}
       >
-        VIEW CONTROLS
+        CONTROLS
       </button>
       {isOpen && (
         <div
@@ -128,7 +128,7 @@ export function ControlsInfo({ systemCore }: ControlsInfoProps) {
             </dl>
             {isTouch && (
               <p className="controls-touch-note">
-                Touch buttons appear over the game while playing.
+                Touch buttons appear below the game, or over it in fullscreen.
               </p>
             )}
           </section>

@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type TouchEvent } from 'react';
+import { useEffect, useRef, type PointerEvent } from 'react';
 import { BUTTONS } from '../../../../packages/protocol/src/input';
 
 interface TouchControllerProps {
   setButton: (button: number, isPressed: boolean) => void;
+  enabled: boolean;
 }
 
 const directions = [
@@ -12,61 +13,35 @@ const directions = [
   { label: 'DOWN', button: BUTTONS.DOWN, className: 'touch-down' },
 ];
 
-function useTouchDevice() {
-  const [isTouch, setIsTouch] = useState(
-    () =>
-      window.matchMedia('(pointer: coarse)').matches ||
-      window.matchMedia('(max-width: 768px)').matches,
-  );
-
-  useEffect(() => {
-    const coarsePointer = window.matchMedia('(pointer: coarse)');
-    const narrowScreen = window.matchMedia('(max-width: 768px)');
-    const update = () =>
-      setIsTouch(coarsePointer.matches || narrowScreen.matches);
-    coarsePointer.addEventListener('change', update);
-    narrowScreen.addEventListener('change', update);
-    return () => {
-      coarsePointer.removeEventListener('change', update);
-      narrowScreen.removeEventListener('change', update);
-    };
-  }, []);
-
-  return isTouch;
-}
-
-export function TouchController({ setButton }: TouchControllerProps) {
-  const isTouch = useTouchDevice();
+export function TouchController({ setButton, enabled }: TouchControllerProps) {
   const activeButtons = useRef(new Set<number>());
-  const setButtonRef = useRef(setButton);
-
-  useEffect(() => {
-    setButtonRef.current = setButton;
-  }, [setButton]);
 
   useEffect(
     () => () => {
       for (const button of activeButtons.current) {
-        setButtonRef.current(button, false);
+        setButton(button, false);
       }
       activeButtons.current.clear();
     },
-    [],
+    [enabled, setButton],
   );
 
-  if (!isTouch) return null;
+  if (!enabled) return null;
 
   const press = (button: number, isPressed: boolean) => {
     if (isPressed) activeButtons.current.add(button);
     else activeButtons.current.delete(button);
     setButton(button, isPressed);
-    if (isPressed && 'vibrate' in navigator) navigator.vibrate(10);
   };
-  const touchStart = (event: TouchEvent, button: number) => {
+  const pointerDown = (event: PointerEvent<HTMLButtonElement>, button: number) => {
     event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
     press(button, true);
+    if (event.pointerType === 'touch' && 'vibrate' in navigator) {
+      navigator.vibrate(10);
+    }
   };
-  const touchEnd = (event: TouchEvent, button: number) => {
+  const pointerEnd = (event: PointerEvent<HTMLButtonElement>, button: number) => {
     event.preventDefault();
     press(button, false);
   };
@@ -84,9 +59,10 @@ export function TouchController({ setButton }: TouchControllerProps) {
             key={label}
             type="button"
             aria-label={label}
-            onTouchStart={(event) => touchStart(event, button)}
-            onTouchEnd={(event) => touchEnd(event, button)}
-            onTouchCancel={(event) => touchEnd(event, button)}
+            onPointerDown={(event) => pointerDown(event, button)}
+            onPointerUp={(event) => pointerEnd(event, button)}
+            onPointerCancel={(event) => pointerEnd(event, button)}
+            onLostPointerCapture={(event) => pointerEnd(event, button)}
           >
             {label === 'UP' ? '▲' : label === 'DOWN' ? '▼' : label === 'LEFT' ? '◀' : '▶'}
           </button>
@@ -102,9 +78,10 @@ export function TouchController({ setButton }: TouchControllerProps) {
             key={label}
             type="button"
             aria-label={label}
-            onTouchStart={(event) => touchStart(event, button)}
-            onTouchEnd={(event) => touchEnd(event, button)}
-            onTouchCancel={(event) => touchEnd(event, button)}
+            onPointerDown={(event) => pointerDown(event, button)}
+            onPointerUp={(event) => pointerEnd(event, button)}
+            onPointerCancel={(event) => pointerEnd(event, button)}
+            onLostPointerCapture={(event) => pointerEnd(event, button)}
           >
             {label}
           </button>
@@ -119,9 +96,10 @@ export function TouchController({ setButton }: TouchControllerProps) {
               key={label}
               type="button"
               aria-label={label}
-              onTouchStart={(event) => touchStart(event, button)}
-              onTouchEnd={(event) => touchEnd(event, button)}
-              onTouchCancel={(event) => touchEnd(event, button)}
+              onPointerDown={(event) => pointerDown(event, button)}
+              onPointerUp={(event) => pointerEnd(event, button)}
+              onPointerCancel={(event) => pointerEnd(event, button)}
+              onLostPointerCapture={(event) => pointerEnd(event, button)}
             >
               {label}
             </button>
