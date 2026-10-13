@@ -139,6 +139,13 @@ test('requires JWT authentication before creating sessions', async () => {
   const app = await buildServer(JWT_SECRET);
   await app.ready();
   try {
+    const health = await app.inject({
+      method: 'GET',
+      url: '/api/v1/health',
+    });
+    assert.equal(health.statusCode, 200);
+    assert.deepEqual(health.json(), { status: 'OK', service: 'orchestrator' });
+
     const response = await app.inject({
       method: 'POST',
       url: '/api/v1/session/start',

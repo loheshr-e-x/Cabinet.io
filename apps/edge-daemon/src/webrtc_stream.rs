@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::RTCPeerConnection;
@@ -26,7 +27,16 @@ impl WebRTCBroadcaster {
         media_engine.register_default_codecs()?;
 
         let api = APIBuilder::new().with_media_engine(media_engine).build();
-        let config = RTCConfiguration::default();
+        let config = RTCConfiguration {
+            ice_servers: vec![RTCIceServer {
+                urls: vec![
+                    "stun:stun.l.google.com:19302".to_string(),
+                    "stun:stun1.l.google.com:19302".to_string(),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
 
         peer_connection.on_data_channel(Box::new(move |data_channel: Arc<RTCDataChannel>| {

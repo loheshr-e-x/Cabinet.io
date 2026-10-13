@@ -106,7 +106,7 @@ export function App() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`${ORCHESTRATOR_URL}/health`, { signal: controller.signal })
+    fetch(`${ORCHESTRATOR_URL}/api/v1/health`, { signal: controller.signal })
       .then((response) => {
         if (!response.ok) throw new Error(`Health check failed (${response.status})`);
         setOrchestratorStatus('online');

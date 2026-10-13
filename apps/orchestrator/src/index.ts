@@ -3,6 +3,10 @@ import Fastify from 'fastify';
 const fastify = Fastify({ logger: true });
 
 // Health Check
+fastify.get('/api/v1/health', async () => {
+  return { status: 'OK', service: 'orchestrator' };
+});
+
 fastify.get('/health', async () => {
   return { status: 'OK', service: 'orchestrator' };
 });

@@ -115,7 +115,9 @@ export async function buildServer(
     );
   };
 
-  fastify.get('/health', async () => ({ status: 'OK', service: 'orchestrator' }));
+  const healthCheck = async () => ({ status: 'OK', service: 'orchestrator' });
+  fastify.get('/api/v1/health', healthCheck);
+  fastify.get('/health', healthCheck);
 
   fastify.get(
     '/api/v1/games',
