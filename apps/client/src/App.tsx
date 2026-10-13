@@ -111,7 +111,13 @@ export function App() {
   const streamViewRef = useRef<HTMLElement | null>(null);
   const touchControlsEnabled = touchControlsOverride ?? isTouchDevice;
 
-  const { connectionStatus, dataChannel, remoteStream, closeSession } = useWebRTCSession({
+  const {
+    connectionStatus,
+    dataChannel,
+    isDataChannelOpen,
+    remoteStream,
+    closeSession,
+  } = useWebRTCSession({
     sessionId: activeSession?.sessionId ?? null,
     token: activeSession?.token ?? null,
     edgeWsUrl: activeSession?.edgeWsUrl ?? null,
@@ -534,7 +540,7 @@ export function App() {
                 <button
                   className="button button--secondary"
                   type="button"
-                  disabled={dataChannel?.readyState !== 'open'}
+                  disabled={!isDataChannelOpen}
                   onClick={() => sendSaveStateCommand('save_state')}
                   title="Save current state (F5)"
                 >
@@ -543,7 +549,7 @@ export function App() {
                 <button
                   className="button button--secondary"
                   type="button"
-                  disabled={dataChannel?.readyState !== 'open'}
+                  disabled={!isDataChannelOpen}
                   onClick={() => sendSaveStateCommand('load_state')}
                   title="Load the state saved in this session (F8)"
                 >
@@ -593,7 +599,7 @@ export function App() {
                   </div>
                 )}
                 <div className="stream-hud" aria-label="Stream diagnostics">
-                  <span>INPUT: <strong>{dataChannel?.readyState === 'open' ? 'READY' : 'WAITING'}</strong></span>
+                  <span>INPUT: <strong>{isDataChannelOpen ? 'READY' : 'WAITING'}</strong></span>
                   <span>ICE: <strong>{connectionStatus.toUpperCase()}</strong></span>
                 </div>
               </div>

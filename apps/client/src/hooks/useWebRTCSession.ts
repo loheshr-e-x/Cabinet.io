@@ -14,12 +14,32 @@ export function useWebRTCSession({
 }: UseWebRTCSessionOptions) {
   const [connectionStatus, setConnectionStatus] = useState('idle');
   const [dataChannel, setDataChannel] = useState<RTCDataChannel | null>(null);
+  const [isDataChannelOpen, setIsDataChannelOpen] = useState(false);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const closeSessionRef = useRef<() => void>(() => {});
   const hasActiveSession = Boolean(sessionId && token && edgeWsUrl);
   const closeSession = useCallback(() => closeSessionRef.current(), []);
+
+  useEffect(() => {
+    if (!dataChannel) return;
+
+    const syncReadyState = () => {
+      setIsDataChannelOpen(dataChannel.readyState === 'open');
+    };
+    dataChannel.addEventListener('open', syncReadyState);
+    dataChannel.addEventListener('close', syncReadyState);
+    const initialSyncId = window.setTimeout(syncReadyState, 0);
+    const pollId = window.setInterval(syncReadyState, 100);
+
+    return () => {
+      dataChannel.removeEventListener('open', syncReadyState);
+      dataChannel.removeEventListener('close', syncReadyState);
+      window.clearTimeout(initialSyncId);
+      window.clearInterval(pollId);
+    };
+  }, [dataChannel]);
 
   useEffect(() => {
     if (!sessionId || !token || !edgeWsUrl) {
@@ -46,6 +66,7 @@ export function useWebRTCSession({
       stopped = true;
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
       setDataChannel(null);
+      setIsDataChannelOpen(false);
       setRemoteStream(null);
       for (const connection of peerConnections) {
         if (connection.signalingState !== 'closed') connection.close();
@@ -83,6 +104,7 @@ export function useWebRTCSession({
       if (stopped) return;
       signalingReady = false;
       pendingCandidates.length = 0;
+      setIsDataChannelOpen(false);
       setConnectionStatus(iceRestart ? 'reconnecting' : 'connecting');
       peerConnection = new RTCPeerConnection({
         iceServers: [
@@ -96,6 +118,16 @@ export function useWebRTCSession({
       peerConnection.addTransceiver('audio', { direction: 'recvonly' });
       const channel = peerConnection.createDataChannel('input');
       setDataChannel(channel);
+      channel.onopen = () => {
+        if (!stopped && peerConnectionRef.current === peerConnection) {
+          setIsDataChannelOpen(true);
+        }
+      };
+      channel.onclose = () => {
+        if (peerConnectionRef.current === peerConnection) {
+          setIsDataChannelOpen(false);
+        }
+      };
 
       peerConnection.ontrack = (event) => {
         if (stopped) return;
@@ -247,6 +279,7 @@ export function useWebRTCSession({
   return {
     connectionStatus: hasActiveSession ? connectionStatus : 'idle',
     dataChannel: hasActiveSession ? dataChannel : null,
+    isDataChannelOpen: hasActiveSession && isDataChannelOpen,
     remoteStream: hasActiveSession ? remoteStream : null,
     peerConnectionRef,
     closeSession,
