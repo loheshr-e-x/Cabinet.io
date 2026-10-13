@@ -7,7 +7,6 @@
     "not_found_handling": "single-page-application"
   },
   "vars": {
-    "NODE_VERSION": "20",
     "VITE_ORCHESTRATOR_URL": "https://cabinet-orchestrator.onrender.com"
   }
 }

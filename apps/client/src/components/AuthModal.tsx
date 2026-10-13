@@ -109,7 +109,7 @@ export function AuthModal({ onAuthSuccess }: AuthModalProps) {
                 autoComplete="username"
                 minLength={3}
                 maxLength={50}
-                pattern="[a-zA-Z0-9_-]{3,50}"
+                pattern="[a-zA-Z0-9_\-]{3,50}"
                 required
                 value={username}
                 onChange={(event) => setUsername(event.target.value)}

@@ -10,6 +10,7 @@ target/
 .env
 .env.*
 !.env.example
+!apps/client/.env.production
 
 # Local tooling and OS files
 .DS_Store
