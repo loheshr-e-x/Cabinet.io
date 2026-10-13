@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[Cabinet Edge] Starting Edge Compute Daemon...");
 
     // 1. Pre-allocate 1920x1080 canvas engine buffers
-    let mut emulator = EmulatorInstance::new(1920, 1080);
+    let emulator = EmulatorInstance::new(1920, 1080);
 
     // 2. Initialize bounded input queue (up to 1024 pending messages)
     let mut input_demuxer = InputDemuxer::new(1024);
@@ -65,17 +65,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // 4. Precise 60 Hz Emulator Frame Loop (16.66ms tick)
+    // Drain the bounded input queue regularly; each session owns its core frame loop.
     let mut ticker = interval(Duration::from_micros(16_666));
     let save_interval = Duration::from_secs(5 * 60);
     let mut save_ticker = interval_at(Instant::now() + save_interval, save_interval);
 
-    println!("[Cabinet Edge] Entering 60 Hz execution loop...");
+    println!("[Cabinet Edge] Entering input and save-state maintenance loop...");
     loop {
         tokio::select! {
             _ = ticker.tick() => {
                 input_demuxer.drain_to_ports(&mut controller_ports);
-                emulator.step_frame();
             }
             _ = save_ticker.tick(), if auto_save_enabled => {
                 match emulator.serialize_state() {

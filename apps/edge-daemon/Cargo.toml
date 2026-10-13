@@ -16,3 +16,5 @@ futures-util = "0.3"
 jsonwebtoken = "9"
 tokio-tungstenite = "0.24"
 url = "2"
+libloading = "0.8"
+vpx-encode = { version = "0.6.2", features = ["ffi-generate"] }

@@ -6,6 +6,9 @@ pub struct FrameBuffer {
     pub width: u32,
     pub height: u32,
     pub pitch: usize,
+    pub frame_number: u64,
+    max_width: u32,
+    max_height: u32,
 }
 
 impl FrameBuffer {
@@ -20,17 +23,47 @@ impl FrameBuffer {
             width: max_width,
             height: max_height,
             pitch: (max_width * 4) as usize,
+            frame_number: 0,
+            max_width,
+            max_height,
         }
     }
 
-    /// Blit incoming core raw video frame directly into pre-allocated memory
-    pub fn update_video(&mut self, src_data: &[u8], width: u32, height: u32, pitch: usize) {
+    pub fn update_video(
+        &mut self,
+        src_data: &[u8],
+        width: u32,
+        height: u32,
+        pitch: usize,
+    ) -> Result<(), &'static str> {
+        let row_bytes = usize::try_from(width)
+            .ok()
+            .and_then(|width| width.checked_mul(4))
+            .ok_or("invalid frame width")?;
+        let required_bytes = pitch
+            .checked_mul(height as usize)
+            .ok_or("invalid frame size")?;
+        if width == 0
+            || height == 0
+            || width > self.max_width
+            || height > self.max_height
+            || pitch < row_bytes
+            || required_bytes > src_data.len()
+        {
+            return Err("frame dimensions, pitch, or source length are invalid");
+        }
+
+        for row in 0..height as usize {
+            let src_start = row * pitch;
+            let dst_start = row * row_bytes;
+            self.video_buffer[dst_start..dst_start + row_bytes]
+                .copy_from_slice(&src_data[src_start..src_start + row_bytes]);
+        }
         self.width = width;
         self.height = height;
-        self.pitch = pitch;
-
-        let bytes_to_copy = (pitch * height as usize).min(self.video_buffer.len());
-        self.video_buffer[..bytes_to_copy].copy_from_slice(&src_data[..bytes_to_copy]);
+        self.pitch = row_bytes;
+        self.frame_number = self.frame_number.wrapping_add(1);
+        Ok(())
     }
 
     /// Copy incoming audio samples into pre-allocated memory

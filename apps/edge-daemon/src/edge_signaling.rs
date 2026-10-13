@@ -7,9 +7,11 @@ use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use std::env;
 use std::error::Error;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
+use tokio::time::{interval, Duration};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{accept_hdr_async, WebSocketStream};
 use url::form_urlencoded;
@@ -107,20 +109,52 @@ async fn handle_connection(
         claims.session_id
     );
 
+    let core_path = env::var("LIBRETRO_CORE_PATH")
+        .map_err(|_| "LIBRETRO_CORE_PATH must point to an installed Libretro shared library")?;
+    let rom_filename = claims
+        .rom_key
+        .rsplit('/')
+        .next()
+        .filter(|filename| !filename.is_empty())
+        .ok_or("ROM key must include a filename")?;
+    let emulator = crate::emulator::EmulatorInstance::load_core(
+        Path::new(&core_path),
+        rom_filename,
+        rom,
+        1920,
+        1080,
+    )?;
+
     let broadcaster = WebRTCBroadcaster::new(input_sender)
         .await
         .map_err(|error| format!("could not initialize WebRTC broadcaster: {error}"))?;
-    handle_signaling(socket, broadcaster, rom).await
+    handle_signaling(socket, broadcaster, emulator).await
 }
 
 async fn handle_signaling(
     mut socket: WebSocketStream<TcpStream>,
-    broadcaster: WebRTCBroadcaster,
-    _rom: Vec<u8>,
+    mut broadcaster: WebRTCBroadcaster,
+    mut emulator: crate::emulator::EmulatorInstance,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut answered = false;
+    let mut frame_ticker = interval(Duration::from_micros(16_667));
+    let mut last_frame_number = 0;
+    let frame_buffer = emulator.get_frame_buffer();
     loop {
         tokio::select! {
+            _ = frame_ticker.tick(), if answered => {
+                emulator.step_frame();
+                let frame_number = frame_buffer
+                    .lock()
+                    .map_err(|_| "Libretro frame buffer lock poisoned")?
+                    .frame_number;
+                if frame_number != last_frame_number {
+                    last_frame_number = frame_number;
+                    broadcaster
+                        .send_video_frame(Arc::clone(&frame_buffer), frame_number as i64)
+                        .await?;
+                }
+            }
             incoming = socket.next() => {
                 let Some(incoming) = incoming else { break };
                 let message = incoming?;

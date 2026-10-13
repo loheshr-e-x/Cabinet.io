@@ -1,6 +1,30 @@
 use crate::frame_buffer::FrameBuffer;
+use libloading::Library;
+use rust_libretro_sys as libretro;
+use std::ffi::CString;
 use std::os::raw::{c_uint, c_void};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+type RetroInit = unsafe extern "C" fn();
+type RetroDeinit = unsafe extern "C" fn();
+type RetroRun = unsafe extern "C" fn();
+type RetroLoadGame = unsafe extern "C" fn(*const libretro::retro_game_info) -> bool;
+type RetroUnloadGame = unsafe extern "C" fn();
+type RetroSetEnvironment = unsafe extern "C" fn(libretro::retro_environment_t);
+type RetroSetVideoRefresh = unsafe extern "C" fn(libretro::retro_video_refresh_t);
+type RetroSetAudioSampleBatch = unsafe extern "C" fn(libretro::retro_audio_sample_batch_t);
+type RetroSetInputPoll = unsafe extern "C" fn(libretro::retro_input_poll_t);
+type RetroSetInputState = unsafe extern "C" fn(libretro::retro_input_state_t);
+
+static ACTIVE_CORE: AtomicBool = AtomicBool::new(false);
+static CALLBACK_FRAME_BUFFER: std::sync::OnceLock<Mutex<Option<Arc<Mutex<FrameBuffer>>>>> =
+    std::sync::OnceLock::new();
+
+fn callback_frame_buffer() -> &'static Mutex<Option<Arc<Mutex<FrameBuffer>>>> {
+    CALLBACK_FRAME_BUFFER.get_or_init(|| Mutex::new(None))
+}
 
 #[derive(Clone, Copy)]
 pub struct LibretroSerializer {
@@ -22,7 +46,13 @@ impl LibretroSerializer {
 
 pub struct EmulatorInstance {
     frame_buffer: Arc<Mutex<FrameBuffer>>,
-    is_running: bool,
+    library: Option<Library>,
+    core_run: Option<RetroRun>,
+    core_unload_game: Option<RetroUnloadGame>,
+    core_deinit: Option<RetroDeinit>,
+    rom: Vec<u8>,
+    game_path: Option<CString>,
+    owns_active_core: bool,
     serializer: Option<LibretroSerializer>,
 }
 
@@ -32,11 +62,122 @@ impl EmulatorInstance {
 
         Self {
             frame_buffer,
-            is_running: false,
+            library: None,
+            core_run: None,
+            core_unload_game: None,
+            core_deinit: None,
+            rom: Vec::new(),
+            game_path: None,
+            owns_active_core: false,
             serializer: None,
         }
     }
 
+    pub fn load_core(
+        core_path: &Path,
+        game_path: &str,
+        rom: Vec<u8>,
+        max_width: u32,
+        max_height: u32,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        if rom.is_empty() {
+            return Err("cannot load an empty ROM".into());
+        }
+        if ACTIVE_CORE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err("the edge daemon supports one active Libretro core at a time".into());
+        }
+
+        let result = Self::load_core_inner(core_path, game_path, rom, max_width, max_height);
+        if result.is_err() {
+            ACTIVE_CORE.store(false, Ordering::Release);
+        }
+        result
+    }
+
+    fn load_core_inner(
+        core_path: &Path,
+        game_path: &str,
+        rom: Vec<u8>,
+        max_width: u32,
+        max_height: u32,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let library = unsafe { Library::new(core_path)? };
+        let retro_init = unsafe { *library.get::<RetroInit>(b"retro_init\0")? };
+        let retro_deinit = unsafe { *library.get::<RetroDeinit>(b"retro_deinit\0")? };
+        let retro_run = unsafe { *library.get::<RetroRun>(b"retro_run\0")? };
+        let retro_load_game = unsafe { *library.get::<RetroLoadGame>(b"retro_load_game\0")? };
+        let retro_unload_game = unsafe { *library.get::<RetroUnloadGame>(b"retro_unload_game\0")? };
+        let set_environment =
+            unsafe { *library.get::<RetroSetEnvironment>(b"retro_set_environment\0")? };
+        let set_video_refresh =
+            unsafe { *library.get::<RetroSetVideoRefresh>(b"retro_set_video_refresh\0")? };
+        let set_audio_sample_batch =
+            unsafe { *library.get::<RetroSetAudioSampleBatch>(b"retro_set_audio_sample_batch\0")? };
+        let set_input_poll =
+            unsafe { *library.get::<RetroSetInputPoll>(b"retro_set_input_poll\0")? };
+        let set_input_state =
+            unsafe { *library.get::<RetroSetInputState>(b"retro_set_input_state\0")? };
+        let game_path = CString::new(game_path)?;
+
+        let frame_buffer = Arc::new(Mutex::new(FrameBuffer::new(max_width, max_height, 2048)));
+        {
+            let mut target = callback_frame_buffer()
+                .lock()
+                .map_err(|_| "Libretro video callback lock poisoned")?;
+            *target = Some(Arc::clone(&frame_buffer));
+        }
+
+        unsafe {
+            set_environment(Some(environment_callback));
+            set_video_refresh(Some(video_refresh_callback));
+            set_audio_sample_batch(Some(audio_sample_batch_callback));
+            set_input_poll(Some(input_poll_callback));
+            set_input_state(Some(input_state_callback));
+            retro_init();
+        }
+
+        let game = libretro::retro_game_info {
+            path: game_path.as_ptr(),
+            data: rom.as_ptr().cast::<c_void>(),
+            size: rom.len(),
+            meta: std::ptr::null(),
+        };
+        if !unsafe { retro_load_game(&game) } {
+            unsafe { retro_deinit() };
+            if let Ok(mut target) = callback_frame_buffer().lock() {
+                *target = None;
+            }
+            return Err("Libretro core rejected the ROM".into());
+        }
+
+        let serializer = unsafe {
+            match (
+                library.get::<unsafe extern "C" fn() -> usize>(b"retro_serialize_size\0"),
+                library
+                    .get::<unsafe extern "C" fn(*mut c_void, usize) -> bool>(b"retro_serialize\0"),
+            ) {
+                (Ok(size), Ok(serialize)) => Some(LibretroSerializer::new(*size, *serialize)),
+                _ => None,
+            }
+        };
+
+        Ok(Self {
+            frame_buffer,
+            library: Some(library),
+            core_run: Some(retro_run),
+            core_unload_game: Some(retro_unload_game),
+            core_deinit: Some(retro_deinit),
+            rom,
+            game_path: Some(game_path),
+            owns_active_core: true,
+            serializer,
+        })
+    }
+
+    #[cfg(test)]
     pub fn set_serializer(&mut self, serializer: LibretroSerializer) {
         self.serializer = Some(serializer);
     }
@@ -64,26 +205,67 @@ impl EmulatorInstance {
         Arc::clone(&self.frame_buffer)
     }
 
-    /// Simulates a single emulator frame tick (60Hz loop)
     pub fn step_frame(&mut self) {
-        if let Ok(_fb) = self.frame_buffer.lock() {
-            // Simulated 60 FPS frame update into zero-allocation buffer
-            // In full implementation, libretro calls retro_run() here
+        if let Some(run) = self.core_run {
+            unsafe { run() };
         }
     }
 }
 
-// Global Libretro C Callbacks (Static pointers for libretro-sys FFI)
+impl Drop for EmulatorInstance {
+    fn drop(&mut self) {
+        if let Some(unload) = self.core_unload_game.take() {
+            unsafe { unload() };
+        }
+        if let Some(deinit) = self.core_deinit.take() {
+            unsafe { deinit() };
+        }
+        self.core_run = None;
+        self.library.take();
+        self.rom.clear();
+        self.game_path.take();
+
+        if self.owns_active_core {
+            if let Ok(mut target) = callback_frame_buffer().lock() {
+                *target = None;
+            }
+            ACTIVE_CORE.store(false, Ordering::Release);
+        }
+    }
+}
+
+unsafe extern "C" fn environment_callback(command: c_uint, data: *mut c_void) -> bool {
+    if command == libretro::RETRO_ENVIRONMENT_SET_PIXEL_FORMAT && !data.is_null() {
+        let requested_format = unsafe { *(data.cast::<u32>()) };
+        return requested_format
+            == libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_XRGB8888 as u32;
+    }
+    false
+}
+
 pub unsafe extern "C" fn video_refresh_callback(
     data: *const c_void,
-    _width: c_uint,
-    _height: c_uint,
-    _pitch: usize,
+    width: c_uint,
+    height: c_uint,
+    pitch: usize,
 ) {
     if data.is_null() {
         return;
     }
-    // Access pre-allocated buffer without allocation
+    let Some(source_len) = pitch.checked_mul(height as usize) else {
+        return;
+    };
+    let source = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), source_len) };
+    let Ok(target) = callback_frame_buffer().lock() else {
+        return;
+    };
+    if let Some(frame_buffer) = target.as_ref() {
+        if let Ok(mut frame_buffer) = frame_buffer.lock() {
+            if let Err(error) = frame_buffer.update_video(source, width, height, pitch) {
+                eprintln!("[Cabinet Edge] Dropping invalid Libretro frame: {error}");
+            }
+        }
+    }
 }
 
 pub unsafe extern "C" fn audio_sample_batch_callback(data: *const i16, frames: usize) -> usize {
@@ -91,6 +273,17 @@ pub unsafe extern "C" fn audio_sample_batch_callback(data: *const i16, frames: u
         return 0;
     }
     frames
+}
+
+unsafe extern "C" fn input_poll_callback() {}
+
+unsafe extern "C" fn input_state_callback(
+    _port: c_uint,
+    _device: c_uint,
+    _index: c_uint,
+    _id: c_uint,
+) -> i16 {
+    0
 }
 
 #[cfg(test)]
@@ -117,5 +310,23 @@ mod tests {
         emulator.set_serializer(LibretroSerializer::new(mock_serialize_size, mock_serialize));
 
         assert_eq!(emulator.serialize_state().unwrap(), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn video_callback_copies_valid_frame_into_shared_buffer() {
+        let frame_buffer = Arc::new(Mutex::new(FrameBuffer::new(2, 2, 1)));
+        *callback_frame_buffer().lock().unwrap() = Some(Arc::clone(&frame_buffer));
+        let frame = [1_u8, 2, 3, 4, 5, 6, 7, 8];
+
+        unsafe {
+            video_refresh_callback(frame.as_ptr().cast(), 2, 1, 8);
+        }
+
+        let captured = frame_buffer.lock().unwrap();
+        assert_eq!(captured.width, 2);
+        assert_eq!(captured.height, 1);
+        assert_eq!(captured.frame_number, 1);
+        assert_eq!(&captured.video_buffer[..8], &frame);
+        *callback_frame_buffer().lock().unwrap() = None;
     }
 }

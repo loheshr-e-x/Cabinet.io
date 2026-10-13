@@ -1,5 +1,6 @@
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use vpx_encode::{Config as VpxConfig, Encoder as VpxEncoder, VideoCodecId};
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::RTCDataChannel;
@@ -10,11 +11,19 @@ use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
 
+use crate::frame_buffer::FrameBuffer;
 use crate::input_demuxer::InputPayload;
 
 pub struct WebRTCBroadcaster {
     pub peer_connection: Arc<RTCPeerConnection>,
     pub video_track: Arc<TrackLocalStaticSample>,
+    video_encoder_sender: mpsc::Sender<VideoFrameRequest>,
+}
+
+struct VideoFrameRequest {
+    frame_buffer: Arc<std::sync::Mutex<FrameBuffer>>,
+    pts: i64,
+    response: oneshot::Sender<Result<Vec<Vec<u8>>, String>>,
 }
 
 impl WebRTCBroadcaster {
@@ -81,21 +90,212 @@ impl WebRTCBroadcaster {
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
 
+        let (video_encoder_sender, video_encoder_receiver) = mpsc::channel(1);
+        std::thread::Builder::new()
+            .name("cabinet-vp8-encoder".to_string())
+            .spawn(move || video_encoder_worker(video_encoder_receiver))?;
+
         Ok(Self {
             peer_connection,
             video_track,
+            video_encoder_sender,
         })
     }
 
-    /// Sends a video frame sample down the WebRTC stream
-    pub async fn send_frame(&self, frame_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
-        let sample = Sample {
-            data: frame_data.into(),
-            duration: std::time::Duration::from_millis(16), // ~60fps frame duration
-            ..Default::default()
-        };
+    pub async fn send_video_frame(
+        &mut self,
+        frame_buffer: Arc<std::sync::Mutex<FrameBuffer>>,
+        pts: i64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.video_encoder_sender
+            .send(VideoFrameRequest {
+                frame_buffer,
+                pts,
+                response: response_sender,
+            })
+            .await?;
+        let encoded_packets = response_receiver
+            .await
+            .map_err(|error| format!("VP8 encoder worker stopped: {error}"))??;
 
-        self.video_track.write_sample(&sample).await?;
+        for packet in encoded_packets {
+            self.video_track
+                .write_sample(&Sample {
+                    data: packet.into(),
+                    duration: std::time::Duration::from_micros(16_667),
+                    ..Default::default()
+                })
+                .await?;
+        }
         Ok(())
+    }
+}
+
+fn video_encoder_worker(mut requests: mpsc::Receiver<VideoFrameRequest>) {
+    let mut encoder: Option<(u32, u32, VpxEncoder)> = None;
+    let mut i420_frame = Vec::new();
+    while let Some(request) = requests.blocking_recv() {
+        let result = request
+            .frame_buffer
+            .lock()
+            .map_err(|_| "Libretro frame buffer lock poisoned".to_string())
+            .and_then(|frame_buffer| {
+                let byte_len = frame_buffer
+                    .pitch
+                    .checked_mul(frame_buffer.height as usize)
+                    .ok_or_else(|| "frame size overflow".to_string())?;
+                encode_video_frame(
+                    &mut encoder,
+                    &mut i420_frame,
+                    &frame_buffer.video_buffer[..byte_len],
+                    frame_buffer.width,
+                    frame_buffer.height,
+                    frame_buffer.pitch,
+                    request.pts,
+                )
+                .map_err(|error| error.to_string())
+            });
+        let _ = request.response.send(result);
+    }
+}
+
+fn encode_video_frame(
+    encoder: &mut Option<(u32, u32, VpxEncoder)>,
+    i420_frame: &mut Vec<u8>,
+    frame_data: &[u8],
+    width: u32,
+    height: u32,
+    pitch: usize,
+    pts: i64,
+) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+        return Err("VP8 encoder requires non-zero even frame dimensions".into());
+    }
+    let needs_encoder = encoder
+        .as_ref()
+        .is_none_or(|(encoder_width, encoder_height, _)| {
+            *encoder_width != width || *encoder_height != height
+        });
+    if needs_encoder {
+        *encoder = Some((
+            width,
+            height,
+            VpxEncoder::new(VpxConfig {
+                width,
+                height,
+                timebase: [1, 60],
+                bitrate: 2_000,
+                codec: VideoCodecId::VP8,
+            })?,
+        ));
+    }
+
+    xrgb8888_to_i420_into(frame_data, width, height, pitch, i420_frame)?;
+    let (_, _, encoder) = encoder.as_mut().expect("encoder was initialized");
+    Ok(encoder
+        .encode(pts, i420_frame)?
+        .map(|packet| packet.data.to_vec())
+        .collect())
+}
+
+#[cfg(test)]
+fn xrgb8888_to_i420(
+    frame: &[u8],
+    width: u32,
+    height: u32,
+    pitch: usize,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut i420 = Vec::new();
+    xrgb8888_to_i420_into(frame, width, height, pitch, &mut i420)?;
+    Ok(i420)
+}
+
+fn xrgb8888_to_i420_into(
+    frame: &[u8],
+    width: u32,
+    height: u32,
+    pitch: usize,
+    i420: &mut Vec<u8>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let width = width as usize;
+    let height = height as usize;
+    let row_bytes = width.checked_mul(4).ok_or("frame width overflow")?;
+    let frame_bytes = pitch.checked_mul(height).ok_or("frame size overflow")?;
+    if width == 0
+        || height == 0
+        || width % 2 != 0
+        || height % 2 != 0
+        || pitch < row_bytes
+        || frame_bytes > frame.len()
+    {
+        return Err("invalid XRGB8888 frame dimensions, pitch, or buffer size".into());
+    }
+
+    let y_size = width * height;
+    let chroma_size = y_size / 4;
+    i420.resize(y_size + 2 * chroma_size, 0);
+    for y in 0..height {
+        for x in 0..width {
+            let offset = y * pitch + x * 4;
+            let blue = frame[offset] as i32;
+            let green = frame[offset + 1] as i32;
+            let red = frame[offset + 2] as i32;
+            i420[y * width + x] =
+                (((66 * red + 129 * green + 25 * blue + 128) >> 8) + 16).clamp(0, 255) as u8;
+        }
+    }
+
+    let u_offset = y_size;
+    let v_offset = y_size + chroma_size;
+    for y in (0..height).step_by(2) {
+        for x in (0..width).step_by(2) {
+            let mut red = 0;
+            let mut green = 0;
+            let mut blue = 0;
+            for row in 0..2 {
+                for column in 0..2 {
+                    let offset = (y + row) * pitch + (x + column) * 4;
+                    blue += frame[offset] as i32;
+                    green += frame[offset + 1] as i32;
+                    red += frame[offset + 2] as i32;
+                }
+            }
+            red /= 4;
+            green /= 4;
+            blue /= 4;
+            let chroma_index = (y / 2) * (width / 2) + (x / 2);
+            i420[u_offset + chroma_index] =
+                (((-38 * red - 74 * green + 112 * blue + 128) >> 8) + 128).clamp(0, 255) as u8;
+            i420[v_offset + chroma_index] =
+                (((112 * red - 94 * green - 18 * blue + 128) >> 8) + 128).clamp(0, 255) as u8;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{encode_video_frame, xrgb8888_to_i420};
+
+    #[test]
+    fn converts_xrgb_rows_to_i420() {
+        let red_frame = [0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0];
+        let i420 = xrgb8888_to_i420(&red_frame, 2, 2, 8).unwrap();
+        assert_eq!(&i420[..4], &[82, 82, 82, 82]);
+        assert_eq!(i420[4], 90);
+        assert_eq!(i420[5], 240);
+    }
+
+    #[test]
+    fn encodes_xrgb_frame_as_vp8() {
+        let frame = [0_u8, 0, 255, 0].repeat(16 * 16);
+        let mut encoder = None;
+        let mut i420_frame = Vec::new();
+
+        let packets =
+            encode_video_frame(&mut encoder, &mut i420_frame, &frame, 16, 16, 16 * 4, 0).unwrap();
+
+        assert!(!packets.is_empty());
     }
 }
