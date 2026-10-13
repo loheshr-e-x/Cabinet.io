@@ -5,13 +5,17 @@ import fastifyWebsocket, { type WebSocket } from '@fastify/websocket';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { authRepository, type AuthRepository } from './db/authRepository.js';
 import { verifyDatabaseConnection } from './db/client.js';
 import { getSaveState, upsertSaveState } from './db/saveRepository.js';
+import { authRoutes } from './routes/auth.js';
 
 declare module '@fastify/jwt' {
   interface FastifyJWT {
     user: {
       sub: string;
+      email?: string;
+      username?: string;
       role?: string;
       edgeNodeId?: string;
     };
@@ -38,7 +42,10 @@ const SIGNALING_MESSAGE_LIMIT = 1_048_576;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export async function buildServer(jwtSecret: string) {
+export async function buildServer(
+  jwtSecret: string,
+  users: AuthRepository = authRepository,
+) {
   if (jwtSecret.length < 32) {
     throw new Error('JWT_SECRET must be at least 32 characters');
   }
@@ -50,6 +57,10 @@ export async function buildServer(jwtSecret: string) {
   await fastify.register(fastifyJwt, { secret: jwtSecret });
   await fastify.register(fastifyWebsocket, {
     options: { maxPayload: SIGNALING_MESSAGE_LIMIT },
+  });
+  await fastify.register(authRoutes, {
+    prefix: '/api/v1/auth',
+    repository: users,
   });
 
   const authenticate = async (request: FastifyRequest, reply: FastifyReply) => {

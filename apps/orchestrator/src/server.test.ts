@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import test from 'node:test';
+import bcrypt from 'bcryptjs';
 import type { WebSocket } from '@fastify/websocket';
+import type {
+  AuthCredentials,
+  AuthRepository,
+  AuthUser,
+} from './db/authRepository.js';
 import { buildServer } from './server.js';
 
 const JWT_SECRET = 'test-signaling-gateway-secret-that-is-at-least-32-characters';
@@ -23,6 +29,91 @@ async function createSession(
 function nextMessage(socket: WebSocket) {
   return once(socket, 'message').then(([data]) => data.toString());
 }
+
+test('signs up and authenticates users with a JWT subject tied to the database user', async () => {
+  const user: AuthUser = {
+    id: '11111111-1111-4111-8111-111111111111',
+    email: 'player@example.com',
+    username: 'arcade_player',
+  };
+  let savedCredentials: AuthCredentials | null = null;
+  const repository: AuthRepository = {
+    async createUser(email, username, passwordHash) {
+      if (savedCredentials) {
+        const error = Object.assign(new Error('duplicate account'), { code: '23505' });
+        throw error;
+      }
+      savedCredentials = { ...user, email, username, passwordHash };
+      return { ...user, email, username };
+    },
+    async findUserByEmail(email) {
+      return savedCredentials?.email === email ? savedCredentials : null;
+    },
+  };
+  const app = await buildServer(JWT_SECRET, repository);
+  await app.ready();
+  try {
+    const invalidSignup = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/signup',
+      payload: { username: 'ab', email: 'invalid', password: 'short' },
+    });
+    assert.equal(invalidSignup.statusCode, 400);
+
+    const signup = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/signup',
+      payload: {
+        username: 'Arcade_Player',
+        email: 'PLAYER@example.com',
+        password: 'A-secure-password-123',
+      },
+    });
+    assert.equal(signup.statusCode, 201);
+    const signupBody = signup.json() as {
+      token: string;
+      user: AuthUser;
+    };
+    assert.equal(signupBody.user.email, 'player@example.com');
+    assert.equal(signupBody.user.username, 'arcade_player');
+    assert.equal(app.jwt.verify<{ sub: string }>(signupBody.token).sub, user.id);
+    assert.equal(
+      await bcrypt.compare('A-secure-password-123', savedCredentials!.passwordHash),
+      true,
+    );
+
+    const duplicate = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/signup',
+      payload: {
+        username: 'another_player',
+        email: 'another@example.com',
+        password: 'A-secure-password-123',
+      },
+    });
+    assert.equal(duplicate.statusCode, 409);
+
+    const login = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { email: ' PLAYER@example.com ', password: 'A-secure-password-123' },
+    });
+    assert.equal(login.statusCode, 200);
+    assert.equal(
+      app.jwt.verify<{ sub: string }>(login.json().token).sub,
+      user.id,
+    );
+
+    const rejectedLogin = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { email: 'player@example.com', password: 'incorrect-password' },
+    });
+    assert.equal(rejectedLogin.statusCode, 401);
+  } finally {
+    await app.close();
+  }
+});
 
 test('requires JWT authentication before creating sessions', async () => {
   const app = await buildServer(JWT_SECRET);

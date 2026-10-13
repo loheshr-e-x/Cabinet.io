@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { AuthModal } from './components/AuthModal';
+import { ORCHESTRATOR_URL } from './config';
 import { useInputHandler } from './hooks/useInputHandler';
 import { useWebRTCSession } from './hooks/useWebRTCSession';
 import './App.css';
@@ -53,10 +55,6 @@ const LIBRARY_GAMES: GameItem[] = [
   },
 ];
 
-const ORCHESTRATOR_URL = (
-  import.meta.env.VITE_ORCHESTRATOR_URL || 'http://localhost:3000'
-).replace(/\/+$/, '');
-
 function getAccessToken(): string | null {
   return window.sessionStorage.getItem('cabinet.accessToken');
 }
@@ -64,6 +62,10 @@ function getAccessToken(): string | null {
 export function App() {
   const [selectedGame, setSelectedGame] = useState<GameItem>(LIBRARY_GAMES[0]);
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(getAccessToken);
+  const [username, setUsername] = useState(
+    () => window.sessionStorage.getItem('cabinet.username') ?? '',
+  );
   const [searchQuery, setSearchQuery] = useState('');
   const [systemFilter, setSystemFilter] = useState('ALL');
   const [launching, setLaunching] = useState(false);
@@ -80,6 +82,15 @@ export function App() {
     signalingUrl: activeSession?.signalingUrl ?? null,
   });
   useInputHandler(dataChannel);
+
+  const signOut = () => {
+    window.sessionStorage.removeItem('cabinet.accessToken');
+    window.sessionStorage.removeItem('cabinet.username');
+    setAccessToken(null);
+    setUsername('');
+    setActiveSession(null);
+    setErrorMessage('');
+  };
 
   useEffect(() => {
     const controller = new AbortController();
@@ -112,11 +123,8 @@ export function App() {
   });
 
   const launchStream = async (game: GameItem) => {
-    const token = getAccessToken();
+    const token = accessToken;
     if (!token) {
-      setErrorMessage(
-        'Sign in first. The authenticated access token must be available in sessionStorage as cabinet.accessToken.',
-      );
       return;
     }
 
@@ -134,6 +142,10 @@ export function App() {
       });
       const result: unknown = await response.json();
       if (!response.ok) {
+        if (response.status === 401) {
+          signOut();
+          return;
+        }
         const serverMessage =
           typeof result === 'object' &&
           result !== null &&
@@ -234,12 +246,25 @@ export function App() {
 
           <div className="header-player">
             <span className="player-slot">SLOT: P1 READY</span>
-            <div className="player-chip" aria-label="Player profile">
-              <span className="player-avatar" aria-hidden="true">
-                P1
-              </span>
-              <span className="player-rank">ELITE</span>
-            </div>
+            {accessToken ? (
+              <button
+                className="player-chip player-chip--signed-in"
+                type="button"
+                onClick={signOut}
+                aria-label={`Sign out ${username}`}
+                title={`Sign out ${username}`}
+              >
+                <span className="player-avatar" aria-hidden="true">
+                  {(username.slice(0, 2) || 'P1').toUpperCase()}
+                </span>
+                <span className="player-rank">LOG OUT</span>
+              </button>
+            ) : (
+              <div className="player-chip" aria-label="Player profile">
+                <span className="player-avatar" aria-hidden="true">P1</span>
+                <span className="player-rank">ELITE</span>
+              </div>
+            )}
           </div>
         </header>
 
@@ -408,6 +433,15 @@ export function App() {
           <span>CABINET.IO <b>©</b> CLOUD ARCADE</span>
         </footer>
       </div>
+      {!accessToken && !activeSession && (
+        <AuthModal
+          onAuthSuccess={(token, authenticatedUsername) => {
+            setAccessToken(token);
+            setUsername(authenticatedUsername);
+            setErrorMessage('');
+          }}
+        />
+      )}
     </main>
   );
 }
