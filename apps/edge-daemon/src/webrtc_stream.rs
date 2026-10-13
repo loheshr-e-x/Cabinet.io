@@ -12,7 +12,6 @@ use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSampl
 use webrtc::track::track_local::TrackLocal;
 
 use crate::frame_buffer::FrameBuffer;
-use crate::input_demuxer::InputPayload;
 
 pub struct WebRTCBroadcaster {
     pub peer_connection: Arc<RTCPeerConnection>,
@@ -28,7 +27,7 @@ struct VideoFrameRequest {
 
 impl WebRTCBroadcaster {
     pub async fn new(
-        input_sender: mpsc::Sender<InputPayload>,
+        input_state: Arc<std::sync::Mutex<u16>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut media_engine = MediaEngine::default();
 
@@ -49,26 +48,36 @@ impl WebRTCBroadcaster {
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
 
         peer_connection.on_data_channel(Box::new(move |data_channel: Arc<RTCDataChannel>| {
-            let input_sender = input_sender.clone();
+            let input_state = Arc::clone(&input_state);
             Box::pin(async move {
+                if data_channel.label() != "input" {
+                    eprintln!(
+                        "[Cabinet Edge] Ignoring unsupported data channel: {}",
+                        data_channel.label()
+                    );
+                    return;
+                }
+                eprintln!("[Cabinet Edge] Input data channel negotiated.");
                 data_channel.on_message(Box::new(move |message| {
-                    let input_sender = input_sender.clone();
+                    let input_state = Arc::clone(&input_state);
                     Box::pin(async move {
                         if message.is_string {
-                            eprintln!("[Cabinet Edge] Ignoring text controller input message.");
+                            eprintln!("[Cabinet Edge] Ignoring text input-channel message.");
                             return;
                         }
-
-                        let payload = match InputPayload::from_bytes(&message.data) {
-                            Ok(payload) => payload,
-                            Err(error) => {
-                                eprintln!("[Cabinet Edge] Invalid controller input: {error}");
-                                return;
+                        if message.data.len() != 2 {
+                            eprintln!(
+                                "[Cabinet Edge] Invalid input mask size: expected 2 bytes, got {}.",
+                                message.data.len()
+                            );
+                            return;
+                        }
+                        let mask = u16::from_le_bytes([message.data[0], message.data[1]]);
+                        match input_state.lock() {
+                            Ok(mut current) => *current = mask,
+                            Err(_) => {
+                                eprintln!("[Cabinet Edge] Input state lock poisoned.");
                             }
-                        };
-
-                        if let Err(error) = input_sender.send(payload).await {
-                            eprintln!("[Cabinet Edge] Failed to queue controller input: {error}");
                         }
                     })
                 }));

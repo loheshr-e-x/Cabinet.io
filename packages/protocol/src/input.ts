@@ -1,22 +1,21 @@
 export const BUTTONS = {
-  UP: 0x01,
-  DOWN: 0x02,
-  LEFT: 0x04,
-  RIGHT: 0x08,
-  A: 0x10,
-  B: 0x20,
-  SELECT: 0x40,
-  START: 0x80,
+  B: 1 << 0,
+  Y: 1 << 1,
+  SELECT: 1 << 2,
+  START: 1 << 3,
+  UP: 1 << 4,
+  DOWN: 1 << 5,
+  LEFT: 1 << 6,
+  RIGHT: 1 << 7,
+  A: 1 << 8,
+  X: 1 << 9,
+  L: 1 << 10,
+  R: 1 << 11,
 } as const;
 
-export function encodeInput(
-  slot: number,
-  bitmask: number,
-  isPressed: boolean,
-) {
+export function encodeInput(bitmask: number) {
   return new Uint8Array([
-    slot & 0xff,
     bitmask & 0xff,
-    isPressed ? 0x01 : 0x00,
+    (bitmask >> 8) & 0xff,
   ]);
 }

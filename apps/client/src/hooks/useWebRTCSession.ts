@@ -65,7 +65,7 @@ export function useWebRTCSession({
       peerConnectionRef.current = peerConnection;
       peerConnection.addTransceiver('video', { direction: 'recvonly' });
       peerConnection.addTransceiver('audio', { direction: 'recvonly' });
-      const channel = peerConnection.createDataChannel('controller-input');
+      const channel = peerConnection.createDataChannel('input');
       setDataChannel(channel);
 
       peerConnection.ontrack = (event) => {

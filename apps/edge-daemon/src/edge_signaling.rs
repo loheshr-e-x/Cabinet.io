@@ -1,4 +1,3 @@
-use crate::input_demuxer::InputPayload;
 use crate::rom_store::download_rom;
 use crate::signaling::{SignalingHandler, SignalingMessage};
 use crate::webrtc_stream::WebRTCBroadcaster;
@@ -10,7 +9,6 @@ use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{accept_hdr_async, WebSocketStream};
@@ -33,25 +31,18 @@ pub async fn bind(port: u16) -> Result<TcpListener, std::io::Error> {
     TcpListener::bind(("0.0.0.0", port)).await
 }
 
-pub async fn serve(
-    listener: TcpListener,
-    input_sender: mpsc::Sender<InputPayload>,
-) -> Result<(), std::io::Error> {
+pub async fn serve(listener: TcpListener) -> Result<(), std::io::Error> {
     loop {
         let (stream, address) = listener.accept().await?;
-        let sender = input_sender.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, sender).await {
+            if let Err(error) = handle_connection(stream).await {
                 eprintln!("[Cabinet Edge] WebRTC session from {address} failed: {error}");
             }
         });
     }
 }
 
-async fn handle_connection(
-    stream: TcpStream,
-    input_sender: mpsc::Sender<InputPayload>,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn handle_connection(stream: TcpStream) -> Result<(), Box<dyn Error + Send + Sync>> {
     let token = Arc::new(std::sync::Mutex::new(None::<String>));
     let token_for_handshake = Arc::clone(&token);
     let socket = accept_hdr_async(
@@ -111,10 +102,16 @@ async fn handle_connection(
 
     let core_path = env::var("LIBRETRO_CORE_PATH")
         .map_err(|_| "LIBRETRO_CORE_PATH must point to an installed Libretro shared library")?;
-    let emulator =
-        crate::emulator::EmulatorInstance::load_core(Path::new(&core_path), rom, 1920, 1080)?;
+    let input_state = Arc::new(std::sync::Mutex::new(0_u16));
+    let emulator = crate::emulator::EmulatorInstance::load_core(
+        Path::new(&core_path),
+        rom,
+        Arc::clone(&input_state),
+        1920,
+        1080,
+    )?;
 
-    let broadcaster = WebRTCBroadcaster::new(input_sender)
+    let broadcaster = WebRTCBroadcaster::new(input_state)
         .await
         .map_err(|error| format!("could not initialize WebRTC broadcaster: {error}"))?;
     handle_signaling(socket, broadcaster, emulator).await

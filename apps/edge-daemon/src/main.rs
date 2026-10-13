@@ -1,14 +1,12 @@
 mod edge_signaling;
 mod emulator;
 mod frame_buffer;
-mod input_demuxer;
 mod rom_store;
 mod save_state;
 mod signaling;
 mod webrtc_stream;
 
 use emulator::EmulatorInstance;
-use input_demuxer::InputDemuxer;
 use save_state::SaveStateManager;
 use std::env;
 use std::sync::Arc;
@@ -22,18 +20,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Pre-allocate 1920x1080 canvas engine buffers
     let emulator = EmulatorInstance::new(1920, 1080);
 
-    // 2. Initialize bounded input queue (up to 1024 pending messages)
-    let mut input_demuxer = InputDemuxer::new(1024);
-    let mut controller_ports: [u16; 4] = [0; 4];
-
     // Railway terminates public TLS and forwards WebSocket traffic to this port.
     let port = env::var("PORT")
         .unwrap_or_else(|_| "8080".to_string())
         .parse::<u16>()?;
     let listener = edge_signaling::bind(port).await?;
-    let input_sender = input_demuxer.get_sender();
     tokio::spawn(async move {
-        if let Err(error) = edge_signaling::serve(listener, input_sender).await {
+        if let Err(error) = edge_signaling::serve(listener).await {
             eprintln!("[Cabinet Edge] WebSocket listener stopped: {error}");
         }
     });
@@ -65,7 +58,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Drain the bounded input queue regularly; each session owns its core frame loop.
     let mut ticker = interval(Duration::from_micros(16_666));
     let save_interval = Duration::from_secs(5 * 60);
     let mut save_ticker = interval_at(Instant::now() + save_interval, save_interval);
@@ -73,9 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[Cabinet Edge] Entering input and save-state maintenance loop...");
     loop {
         tokio::select! {
-            _ = ticker.tick() => {
-                input_demuxer.drain_to_ports(&mut controller_ports);
-            }
+            _ = ticker.tick() => {}
             _ = save_ticker.tick(), if auto_save_enabled => {
                 match emulator.serialize_state() {
                     Ok(state) => {

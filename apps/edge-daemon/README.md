@@ -29,3 +29,9 @@ After starting the daemon, create a browser session through the orchestrator.
 The edge daemon steps the loaded core at approximately 60 Hz and sends frames
 through its negotiated VP8 video track. Audio encoding/streaming is not yet
 implemented.
+
+## Controller input
+
+The browser creates an ordered WebRTC DataChannel named `input`. It sends the
+current Libretro Retropad state as two little-endian bytes; the daemon exposes
+the 16 button bits through `retro_input_state` for player port 0.

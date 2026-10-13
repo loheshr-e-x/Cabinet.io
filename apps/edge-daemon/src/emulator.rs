@@ -25,9 +25,15 @@ static ACTIVE_CORE: AtomicBool = AtomicBool::new(false);
 static TEMP_ROM_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static CALLBACK_FRAME_BUFFER: std::sync::OnceLock<Mutex<Option<Arc<Mutex<FrameBuffer>>>>> =
     std::sync::OnceLock::new();
+static CALLBACK_INPUT_STATE: std::sync::OnceLock<Mutex<Option<Arc<Mutex<u16>>>>> =
+    std::sync::OnceLock::new();
 
 fn callback_frame_buffer() -> &'static Mutex<Option<Arc<Mutex<FrameBuffer>>>> {
     CALLBACK_FRAME_BUFFER.get_or_init(|| Mutex::new(None))
+}
+
+fn callback_input_state() -> &'static Mutex<Option<Arc<Mutex<u16>>>> {
+    CALLBACK_INPUT_STATE.get_or_init(|| Mutex::new(None))
 }
 
 #[derive(Clone, Copy)]
@@ -82,6 +88,7 @@ impl EmulatorInstance {
     pub fn load_core(
         core_path: &Path,
         rom: Vec<u8>,
+        input_state: Arc<Mutex<u16>>,
         max_width: u32,
         max_height: u32,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -95,7 +102,7 @@ impl EmulatorInstance {
             return Err("the edge daemon supports one active Libretro core at a time".into());
         }
 
-        let result = Self::load_core_inner(core_path, rom, max_width, max_height);
+        let result = Self::load_core_inner(core_path, rom, input_state, max_width, max_height);
         if result.is_err() {
             ACTIVE_CORE.store(false, Ordering::Release);
         }
@@ -105,6 +112,7 @@ impl EmulatorInstance {
     fn load_core_inner(
         core_path: &Path,
         rom: Vec<u8>,
+        input_state: Arc<Mutex<u16>>,
         max_width: u32,
         max_height: u32,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -153,6 +161,12 @@ impl EmulatorInstance {
                 .map_err(|_| "Libretro video callback lock poisoned")?;
             *target = Some(Arc::clone(&frame_buffer));
         }
+        {
+            let mut target = callback_input_state()
+                .lock()
+                .map_err(|_| "Libretro input callback lock poisoned")?;
+            *target = Some(Arc::clone(&input_state));
+        }
 
         unsafe {
             set_environment(Some(environment_callback));
@@ -180,6 +194,9 @@ impl EmulatorInstance {
         if !unsafe { retro_load_game(&game) } {
             unsafe { retro_deinit() };
             if let Ok(mut target) = callback_frame_buffer().lock() {
+                *target = None;
+            }
+            if let Ok(mut target) = callback_input_state().lock() {
                 *target = None;
             }
             if let Some(path) = &temporary_rom_path {
@@ -275,6 +292,9 @@ impl Drop for EmulatorInstance {
             if let Ok(mut target) = callback_frame_buffer().lock() {
                 *target = None;
             }
+            if let Ok(mut target) = callback_input_state().lock() {
+                *target = None;
+            }
             ACTIVE_CORE.store(false, Ordering::Release);
         }
     }
@@ -350,12 +370,24 @@ pub unsafe extern "C" fn audio_sample_batch_callback(data: *const i16, frames: u
 unsafe extern "C" fn input_poll_callback() {}
 
 unsafe extern "C" fn input_state_callback(
-    _port: c_uint,
-    _device: c_uint,
+    port: c_uint,
+    device: c_uint,
     _index: c_uint,
-    _id: c_uint,
+    id: c_uint,
 ) -> i16 {
-    0
+    if port != 0 || device != libretro::RETRO_DEVICE_JOYPAD || id > 15 {
+        return 0;
+    }
+    let Ok(target) = callback_input_state().lock() else {
+        return 0;
+    };
+    let Some(input_state) = target.as_ref() else {
+        return 0;
+    };
+    let Ok(input_state) = input_state.lock() else {
+        return 0;
+    };
+    i16::from(*input_state & (1 << id) != 0)
 }
 
 #[cfg(test)]
@@ -400,6 +432,36 @@ mod tests {
         assert_eq!(captured.frame_number, 1);
         assert_eq!(&captured.video_buffer[..8], &frame);
         *callback_frame_buffer().lock().unwrap() = None;
+    }
+
+    #[test]
+    fn input_callback_reports_retropad_bits_from_shared_mask() {
+        let input_state = Arc::new(Mutex::new(1 << libretro::RETRO_DEVICE_ID_JOYPAD_A));
+        *callback_input_state().lock().unwrap() = Some(Arc::clone(&input_state));
+
+        let pressed = unsafe {
+            input_state_callback(
+                0,
+                libretro::RETRO_DEVICE_JOYPAD,
+                0,
+                libretro::RETRO_DEVICE_ID_JOYPAD_A,
+            )
+        };
+        let released = unsafe {
+            input_state_callback(
+                0,
+                libretro::RETRO_DEVICE_JOYPAD,
+                0,
+                libretro::RETRO_DEVICE_ID_JOYPAD_B,
+            )
+        };
+        let unsupported_port =
+            unsafe { input_state_callback(1, libretro::RETRO_DEVICE_JOYPAD, 0, 8) };
+
+        assert_eq!(pressed, 1);
+        assert_eq!(released, 0);
+        assert_eq!(unsupported_port, 0);
+        *callback_input_state().lock().unwrap() = None;
     }
 
     #[test]
