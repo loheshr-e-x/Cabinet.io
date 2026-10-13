@@ -21,6 +21,12 @@ interface ActiveSession {
   game: GameItem;
 }
 
+interface SaveStateStatus {
+  action: 'save' | 'load';
+  success: boolean;
+  message: string;
+}
+
 function parseGameCatalog(value: unknown): GameItem[] {
   if (
     typeof value !== 'object' ||
@@ -97,6 +103,7 @@ export function App() {
   const [fullscreenError, setFullscreenError] = useState('');
   const [isMuted, setIsMuted] = useState(true);
   const [audioError, setAudioError] = useState('');
+  const [saveStateStatus, setSaveStateStatus] = useState<SaveStateStatus | null>(null);
   const [orchestratorStatus, setOrchestratorStatus] = useState<
     'checking' | 'online' | 'offline'
   >('checking');
@@ -110,6 +117,66 @@ export function App() {
     edgeWsUrl: activeSession?.edgeWsUrl ?? null,
   });
   const setButton = useInputHandler(dataChannel);
+  const sendSaveStateCommand = useCallback(
+    (command: 'save_state' | 'load_state') => {
+      if (!dataChannel || dataChannel.readyState !== 'open') {
+        setSaveStateStatus({
+          action: command === 'save_state' ? 'save' : 'load',
+          success: false,
+          message: 'The game input channel is not connected.',
+        });
+        return;
+      }
+
+      setSaveStateStatus(null);
+      dataChannel.send(JSON.stringify({ type: command }));
+    },
+    [dataChannel],
+  );
+
+  useEffect(() => {
+    if (!dataChannel) return;
+    const handleMessage = (event: MessageEvent<unknown>) => {
+      if (typeof event.data !== 'string') return;
+      try {
+        const message: unknown = JSON.parse(event.data);
+        if (
+          typeof message === 'object' &&
+          message !== null &&
+          'type' in message &&
+          message.type === 'save_state_result' &&
+          'action' in message &&
+          (message.action === 'save' || message.action === 'load') &&
+          'success' in message &&
+          typeof message.success === 'boolean' &&
+          'message' in message &&
+          typeof message.message === 'string'
+        ) {
+          setSaveStateStatus({
+            action: message.action,
+            success: message.success,
+            message: message.message,
+          });
+        }
+      } catch (error) {
+        console.error('[Cabinet] Could not parse save-state response:', error);
+      }
+    };
+    dataChannel.addEventListener('message', handleMessage);
+    return () => dataChannel.removeEventListener('message', handleMessage);
+  }, [dataChannel]);
+
+  useEffect(() => {
+    if (!activeSession) return;
+    const handleSaveStateShortcut = (event: KeyboardEvent) => {
+      if (event.repeat || (event.key !== 'F5' && event.key !== 'F8')) return;
+      event.preventDefault();
+      sendSaveStateCommand(event.key === 'F5' ? 'save_state' : 'load_state');
+    };
+    window.addEventListener('keydown', handleSaveStateShortcut);
+    return () => window.removeEventListener('keydown', handleSaveStateShortcut);
+  }, [activeSession, sendSaveStateCommand]);
+
   const bindVideoElement = useCallback(
     (video: HTMLVideoElement | null) => {
       videoRef.current = video;
@@ -304,6 +371,7 @@ export function App() {
       setSelectedGame(game);
       setIsMuted(true);
       setAudioError('');
+      setSaveStateStatus(null);
       setActiveSession({
         sessionId: result.sessionId,
         edgeWsUrl: result.edgeWsUrl,
@@ -461,6 +529,24 @@ export function App() {
                 >
                   AUDIO: {isMuted ? 'OFF' : 'ON'}
                 </button>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  disabled={dataChannel?.readyState !== 'open'}
+                  onClick={() => sendSaveStateCommand('save_state')}
+                  title="Save current state (F5)"
+                >
+                  SAVE STATE
+                </button>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  disabled={dataChannel?.readyState !== 'open'}
+                  onClick={() => sendSaveStateCommand('load_state')}
+                  title="Load the state saved in this session (F8)"
+                >
+                  LOAD STATE
+                </button>
               </div>
               <div className="stream-session-meta">
                 <span className="eyebrow">NOW PLAYING</span>
@@ -473,6 +559,15 @@ export function App() {
                 <p className="stream-error" role="alert">{fullscreenError}</p>
               )}
               {audioError && <p className="stream-error" role="alert">{audioError}</p>}
+              {saveStateStatus && (
+                <p
+                  className={saveStateStatus.success ? 'save-state-notice' : 'stream-error'}
+                  role={saveStateStatus.success ? 'status' : 'alert'}
+                  aria-live="polite"
+                >
+                  {saveStateStatus.message}
+                </p>
+              )}
             </div>
             <div className="stream-player-stage">
               <div className="stream-viewport">

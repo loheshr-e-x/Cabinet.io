@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::select! {
             _ = ticker.tick() => {}
             _ = save_ticker.tick(), if auto_save_enabled => {
-                match emulator.serialize_state() {
+                match emulator.save_state() {
                     Ok(state) => {
                         if let (Some(manager), Some((user_id, game_id)), Some(slot_id)) =
                             (&save_state_manager, &save_identity, save_slot)

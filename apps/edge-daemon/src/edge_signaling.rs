@@ -126,6 +126,8 @@ async fn handle_signaling(
     let mut frame_ticker = interval(Duration::from_micros(16_667));
     let mut last_frame_number = 0;
     let frame_buffer = emulator.get_frame_buffer();
+    let mut save_state_commands = broadcaster.take_save_state_commands();
+    let mut saved_state: Option<Vec<u8>> = None;
     loop {
         tokio::select! {
             _ = frame_ticker.tick(), if answered => {
@@ -139,6 +141,45 @@ async fn handle_signaling(
                     broadcaster
                         .send_video_frame(Arc::clone(&frame_buffer), frame_number as i64)
                         .await?;
+                }
+            }
+            command = save_state_commands.recv(), if answered && !save_state_commands.is_closed() => {
+                match command {
+                    Some(crate::webrtc_stream::SaveStateCommand::Save(channel)) => {
+                        let result = emulator.save_state().map(|state| {
+                            let size = state.len();
+                            saved_state = Some(state);
+                            format!("Save state captured for this session ({size} bytes).")
+                        });
+                        let (success, message) = match result {
+                            Ok(message) => (true, message),
+                            Err(error) => (false, error),
+                        };
+                        channel.send_text(serde_json::json!({
+                            "type": "save_state_result",
+                            "action": "save",
+                            "success": success,
+                            "message": message,
+                        }).to_string()).await?;
+                    }
+                    Some(crate::webrtc_stream::SaveStateCommand::Load(channel)) => {
+                        let result = match saved_state.as_deref() {
+                            Some(state) => emulator.load_state(state)
+                                .map(|()| format!("Save state loaded ({} bytes).", state.len())),
+                            None => Err("No save state has been captured in this session.".to_string()),
+                        };
+                        let (success, message) = match result {
+                            Ok(message) => (true, message),
+                            Err(error) => (false, error),
+                        };
+                        channel.send_text(serde_json::json!({
+                            "type": "save_state_result",
+                            "action": "load",
+                            "success": success,
+                            "message": message,
+                        }).to_string()).await?;
+                    }
+                    None => {}
                 }
             }
             incoming = socket.next() => {

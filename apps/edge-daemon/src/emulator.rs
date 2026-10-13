@@ -20,6 +20,9 @@ type RetroSetVideoRefresh = unsafe extern "C" fn(libretro::retro_video_refresh_t
 type RetroSetAudioSampleBatch = unsafe extern "C" fn(libretro::retro_audio_sample_batch_t);
 type RetroSetInputPoll = unsafe extern "C" fn(libretro::retro_input_poll_t);
 type RetroSetInputState = unsafe extern "C" fn(libretro::retro_input_state_t);
+type RetroSerializeSize = unsafe extern "C" fn() -> usize;
+type RetroSerialize = unsafe extern "C" fn(*mut c_void, usize) -> bool;
+type RetroUnserialize = unsafe extern "C" fn(*const c_void, usize) -> bool;
 
 static ACTIVE_CORE: AtomicBool = AtomicBool::new(false);
 static TEMP_ROM_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -38,18 +41,21 @@ fn callback_input_state() -> &'static Mutex<Option<Arc<Mutex<u16>>>> {
 
 #[derive(Clone, Copy)]
 pub struct LibretroSerializer {
-    serialize_size: unsafe extern "C" fn() -> usize,
-    serialize: unsafe extern "C" fn(*mut c_void, usize) -> bool,
+    serialize_size: RetroSerializeSize,
+    serialize: RetroSerialize,
+    unserialize: Option<RetroUnserialize>,
 }
 
 impl LibretroSerializer {
     pub fn new(
-        serialize_size: unsafe extern "C" fn() -> usize,
-        serialize: unsafe extern "C" fn(*mut c_void, usize) -> bool,
+        serialize_size: RetroSerializeSize,
+        serialize: RetroSerialize,
+        unserialize: Option<RetroUnserialize>,
     ) -> Self {
         Self {
             serialize_size,
             serialize,
+            unserialize,
         }
     }
 }
@@ -212,11 +218,16 @@ impl EmulatorInstance {
 
         let serializer = unsafe {
             match (
-                library.get::<unsafe extern "C" fn() -> usize>(b"retro_serialize_size\0"),
-                library
-                    .get::<unsafe extern "C" fn(*mut c_void, usize) -> bool>(b"retro_serialize\0"),
+                library.get::<RetroSerializeSize>(b"retro_serialize_size\0"),
+                library.get::<RetroSerialize>(b"retro_serialize\0"),
             ) {
-                (Ok(size), Ok(serialize)) => Some(LibretroSerializer::new(*size, *serialize)),
+                (Ok(size), Ok(serialize)) => {
+                    let unserialize = library
+                        .get::<RetroUnserialize>(b"retro_unserialize\0")
+                        .ok()
+                        .map(|function| *function);
+                    Some(LibretroSerializer::new(*size, *serialize, unserialize))
+                }
                 _ => None,
             }
         };
@@ -240,7 +251,7 @@ impl EmulatorInstance {
         self.serializer = Some(serializer);
     }
 
-    pub fn serialize_state(&self) -> Result<Vec<u8>, String> {
+    pub fn save_state(&self) -> Result<Vec<u8>, String> {
         let serializer = self
             .serializer
             .ok_or_else(|| "No loaded Libretro core serializer is attached".to_string())?;
@@ -257,6 +268,31 @@ impl EmulatorInstance {
         }
 
         Ok(state)
+    }
+
+    pub fn load_state(&self, state: &[u8]) -> Result<(), String> {
+        let serializer = self
+            .serializer
+            .ok_or_else(|| "No loaded Libretro core serializer is attached".to_string())?;
+        let unserialize = serializer.unserialize.ok_or_else(|| {
+            "The loaded Libretro core does not support loading save states".to_string()
+        })?;
+        if state.is_empty() {
+            return Err("Cannot load an empty save state".to_string());
+        }
+        let expected_size = unsafe { (serializer.serialize_size)() };
+        if state.len() != expected_size {
+            return Err(format!(
+                "Save state size mismatch: expected {expected_size} bytes, got {}",
+                state.len()
+            ));
+        }
+
+        if unsafe { unserialize(state.as_ptr().cast::<c_void>(), state.len()) } {
+            Ok(())
+        } else {
+            Err("Libretro core rejected the save state".to_string())
+        }
     }
 
     pub fn get_frame_buffer(&self) -> Arc<Mutex<FrameBuffer>> {
@@ -408,12 +444,34 @@ mod tests {
         true
     }
 
+    unsafe extern "C" fn mock_unserialize(data: *const c_void, size: usize) -> bool {
+        !data.is_null() && size == 4
+    }
+
     #[test]
     fn serializes_state_through_libretro_callbacks() {
         let mut emulator = EmulatorInstance::new(1, 1);
-        emulator.set_serializer(LibretroSerializer::new(mock_serialize_size, mock_serialize));
+        emulator.set_serializer(LibretroSerializer::new(
+            mock_serialize_size,
+            mock_serialize,
+            Some(mock_unserialize),
+        ));
 
-        assert_eq!(emulator.serialize_state().unwrap(), [1, 2, 3, 4]);
+        assert_eq!(emulator.save_state().unwrap(), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn loads_state_through_libretro_callback_and_rejects_wrong_sizes() {
+        let mut emulator = EmulatorInstance::new(1, 1);
+        emulator.set_serializer(LibretroSerializer::new(
+            mock_serialize_size,
+            mock_serialize,
+            Some(mock_unserialize),
+        ));
+
+        assert!(emulator.load_state(&[1, 2, 3, 4]).is_ok());
+        assert!(emulator.load_state(&[1, 2]).is_err());
+        assert!(emulator.load_state(&[]).is_err());
     }
 
     #[test]

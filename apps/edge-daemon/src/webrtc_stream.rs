@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use vpx_encode::{Config as VpxConfig, Encoder as VpxEncoder, VideoCodecId};
@@ -17,6 +18,19 @@ pub struct WebRTCBroadcaster {
     pub peer_connection: Arc<RTCPeerConnection>,
     pub video_track: Arc<TrackLocalStaticSample>,
     video_encoder_sender: mpsc::Sender<VideoFrameRequest>,
+    save_state_commands: Option<mpsc::UnboundedReceiver<SaveStateCommand>>,
+}
+
+pub enum SaveStateCommand {
+    Save(Arc<RTCDataChannel>),
+    Load(Arc<RTCDataChannel>),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum DataChannelCommand {
+    SaveState,
+    LoadState,
 }
 
 struct VideoFrameRequest {
@@ -29,6 +43,7 @@ impl WebRTCBroadcaster {
     pub async fn new(
         input_state: Arc<std::sync::Mutex<u16>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (save_state_sender, save_state_commands) = mpsc::unbounded_channel();
         let mut media_engine = MediaEngine::default();
 
         // Register VP8 Video Codec
@@ -49,6 +64,7 @@ impl WebRTCBroadcaster {
 
         peer_connection.on_data_channel(Box::new(move |data_channel: Arc<RTCDataChannel>| {
             let input_state = Arc::clone(&input_state);
+            let save_state_sender = save_state_sender.clone();
             Box::pin(async move {
                 if data_channel.label() != "input" {
                     eprintln!(
@@ -58,11 +74,38 @@ impl WebRTCBroadcaster {
                     return;
                 }
                 eprintln!("[Cabinet Edge] Input data channel negotiated.");
+                let command_channel = Arc::clone(&data_channel);
                 data_channel.on_message(Box::new(move |message| {
                     let input_state = Arc::clone(&input_state);
+                    let save_state_sender = save_state_sender.clone();
+                    let data_channel = Arc::clone(&command_channel);
                     Box::pin(async move {
                         if message.is_string {
-                            eprintln!("[Cabinet Edge] Ignoring text input-channel message.");
+                            match serde_json::from_slice::<DataChannelCommand>(&message.data) {
+                                Ok(DataChannelCommand::SaveState) => {
+                                    if save_state_sender
+                                        .send(SaveStateCommand::Save(data_channel))
+                                        .is_err()
+                                    {
+                                        eprintln!(
+                                            "[Cabinet Edge] Save-state command receiver stopped."
+                                        );
+                                    }
+                                }
+                                Ok(DataChannelCommand::LoadState) => {
+                                    if save_state_sender
+                                        .send(SaveStateCommand::Load(data_channel))
+                                        .is_err()
+                                    {
+                                        eprintln!(
+                                            "[Cabinet Edge] Load-state command receiver stopped."
+                                        );
+                                    }
+                                }
+                                Err(error) => eprintln!(
+                                    "[Cabinet Edge] Invalid data-channel command: {error}"
+                                ),
+                            }
                             return;
                         }
                         if message.data.len() != 2 {
@@ -108,7 +151,14 @@ impl WebRTCBroadcaster {
             peer_connection,
             video_track,
             video_encoder_sender,
+            save_state_commands: Some(save_state_commands),
         })
+    }
+
+    pub fn take_save_state_commands(&mut self) -> mpsc::UnboundedReceiver<SaveStateCommand> {
+        self.save_state_commands
+            .take()
+            .expect("save-state command receiver already taken")
     }
 
     pub async fn send_video_frame(

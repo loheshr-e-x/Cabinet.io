@@ -1110,6 +1110,13 @@
   font-size: 14px;
 }
 
+.save-state-notice {
+  flex-basis: 100%;
+  margin: 0;
+  color: #72ffab;
+  font-size: 14px;
+}
+
 .stream-session-meta {
   flex-wrap: wrap;
   justify-content: flex-end;
