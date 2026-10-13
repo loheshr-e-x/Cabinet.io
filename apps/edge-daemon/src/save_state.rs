@@ -5,6 +5,7 @@ use postgres_native_tls::MakeTlsConnector;
 use redis::AsyncCommands;
 use std::env;
 use std::error::Error;
+use tokio_postgres::types::ToSql;
 
 pub struct SaveStateManager {
     redis_client: Option<redis::Client>,
@@ -80,6 +81,13 @@ impl SaveStateManager {
         slot_id: u8,
         raw_ram_bytes: &[u8],
     ) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        if user_id.is_empty() || game_id.is_empty() {
+            eprintln!(
+                "[Cabinet Save] Skipping save-state persistence because user_id or game_id is empty."
+            );
+            return Err("user_id and game_id are required to persist a save state".into());
+        }
+
         let size = i32::try_from(raw_ram_bytes.len())?;
         let object_key = save_state_object_key(user_id, game_id, slot_id);
         self.s3_client
@@ -102,14 +110,20 @@ impl SaveStateManager {
                 "
                     INSERT INTO save_states
                         (user_id, game_id, slot_id, r2_object_key, byte_size, updated_at)
-                    VALUES ($1::uuid, $2::uuid, $3, $4, $5, CURRENT_TIMESTAMP)
+                    VALUES ($1::text::uuid, $2::text::uuid, $3, $4, $5, CURRENT_TIMESTAMP)
                     ON CONFLICT (user_id, game_id, slot_id)
                     DO UPDATE SET
                         r2_object_key = EXCLUDED.r2_object_key,
                         byte_size = EXCLUDED.byte_size,
                         updated_at = CURRENT_TIMESTAMP
                 ",
-                &[&user_id, &game_id, &i32::from(slot_id), &object_key, &size],
+                &[
+                    &user_id as &(dyn ToSql + Sync),
+                    &game_id as &(dyn ToSql + Sync),
+                    &i32::from(slot_id),
+                    &object_key,
+                    &size,
+                ],
             )
             .await?;
 
@@ -148,6 +162,13 @@ impl SaveStateManager {
         game_id: &str,
         slot_id: u8,
     ) -> Result<Option<Vec<u8>>, Box<dyn Error + Send + Sync>> {
+        if user_id.is_empty() || game_id.is_empty() {
+            eprintln!(
+                "[Cabinet Save] Skipping save-state metadata lookup because user_id or game_id is empty."
+            );
+            return Ok(None);
+        }
+
         let tls = MakeTlsConnector::new(native_tls::TlsConnector::new()?);
         let (client, connection) = tokio_postgres::connect(&self.database_url, tls).await?;
         tokio::spawn(async move {
@@ -160,9 +181,13 @@ impl SaveStateManager {
                 "
                     SELECT r2_object_key, byte_size
                     FROM save_states
-                    WHERE user_id = $1::uuid AND game_id = $2::uuid AND slot_id = $3
+                    WHERE user_id = $1::text::uuid AND game_id = $2::text::uuid AND slot_id = $3
                 ",
-                &[&user_id, &game_id, &i32::from(slot_id)],
+                &[
+                    &user_id as &(dyn ToSql + Sync),
+                    &game_id as &(dyn ToSql + Sync),
+                    &i32::from(slot_id),
+                ],
             )
             .await?;
         let Some(record) = record else {

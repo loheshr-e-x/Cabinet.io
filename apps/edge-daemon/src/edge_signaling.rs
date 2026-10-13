@@ -209,6 +209,7 @@ async fn handle_signaling_loop(
     let mut answered = false;
     let mut frame_ticker = interval(Duration::from_micros(16_667));
     let mut last_frame_number = 0;
+    let mut session_save_state: Option<Vec<u8>> = None;
     let frame_buffer = emulator.get_frame_buffer();
     let mut save_state_commands = broadcaster.take_save_state_commands();
     let mut peer_state_changes = broadcaster.take_peer_state_changes();
@@ -230,20 +231,30 @@ async fn handle_signaling_loop(
             command = save_state_commands.recv(), if answered && !save_state_commands.is_closed() => {
                 match command {
                     Some(crate::webrtc_stream::SaveStateCommand::Save(channel)) => {
-                        let result = match (&save_state_manager, game_id.is_empty(), emulator.save_state()) {
-                            (_, true, _) => Err("Cannot persist a save state without a game ID.".into()),
-                            (Some(manager), false, Ok(state)) => {
-                                manager
-                                    .capture_and_sync_state(user_id, game_id, 0, &state)
-                                    .await
-                                    .map(|size| format!("Save state persisted ({size} bytes)."))
+                        let result = match emulator.save_state() {
+                            Ok(state) => {
+                                let state_size = state.len();
+                                session_save_state = Some(state.clone());
+                                if user_id.is_empty() || game_id.is_empty() {
+                                    eprintln!(
+                                        "[Cabinet Save] Keeping state in the active session only because user_id or game_id is empty."
+                                    );
+                                    Ok(format!("State saved for this session ({state_size} bytes; not persisted)."))
+                                } else if let Some(manager) = &save_state_manager {
+                                    manager
+                                        .capture_and_sync_state(user_id, game_id, 0, &state)
+                                        .await
+                                        .map(|size| format!("Save state persisted ({size} bytes)."))
+                                        .map_err(|error| error.to_string())
+                                } else {
+                                    Ok(format!("State saved for this session ({state_size} bytes; persistence is not configured)."))
+                                }
                             }
-                            (None, _, _) => Err("Persistent save states are not configured.".into()),
-                            (_, _, Err(error)) => Err(error.into()),
+                            Err(error) => Err(error.to_string()),
                         };
                         let (success, message) = match result {
                             Ok(message) => (true, message),
-                            Err(error) => (false, error.to_string()),
+                            Err(error) => (false, error),
                         };
                         channel.send_text(serde_json::json!({
                             "type": "save_state_result",
@@ -253,16 +264,32 @@ async fn handle_signaling_loop(
                         }).to_string()).await?;
                     }
                     Some(crate::webrtc_stream::SaveStateCommand::Load(channel)) => {
-                        let result = match (game_id.is_empty(), &save_state_manager) {
-                            (true, _) => Err("Cannot load a save state without a game ID.".to_string()),
-                            (false, Some(manager)) => match manager.load_state(user_id, game_id, 0).await {
-                                Ok(Some(state)) => emulator
-                                    .load_state(&state)
-                                    .map(|()| format!("Save state loaded ({} bytes).", state.len())),
-                                Ok(None) => Err("No persistent save state exists for this game.".to_string()),
-                                Err(error) => Err(error.to_string()),
+                        let persistent_state = if user_id.is_empty() || game_id.is_empty() {
+                            eprintln!(
+                                "[Cabinet Save] Loading from the active session only because user_id or game_id is empty."
+                            );
+                            Ok(None)
+                        } else if let Some(manager) = &save_state_manager {
+                            manager.load_state(user_id, game_id, 0).await
+                        } else {
+                            Ok(None)
+                        };
+                        let result = match persistent_state {
+                            Ok(Some(state)) => emulator
+                                .load_state(&state)
+                                .map(|()| {
+                                    session_save_state = Some(state.clone());
+                                    format!("Save state loaded ({} bytes).", state.len())
+                                })
+                                .map_err(|error| error.to_string()),
+                            Ok(None) => match &session_save_state {
+                                Some(state) => emulator
+                                    .load_state(state)
+                                    .map(|()| format!("Session save state loaded ({} bytes).", state.len()))
+                                    .map_err(|error| error.to_string()),
+                                None => Err("No saved state is available for this session.".to_string()),
                             },
-                            (false, None) => Err("Persistent save states are not configured.".to_string()),
+                            Err(error) => Err(error.to_string()),
                         };
                         let (success, message) = match result {
                             Ok(message) => (true, message),

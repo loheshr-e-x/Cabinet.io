@@ -118,16 +118,16 @@ export function useWebRTCSession({
       peerConnection.addTransceiver('audio', { direction: 'recvonly' });
       const channel = peerConnection.createDataChannel('input');
       setDataChannel(channel);
-      channel.onopen = () => {
+      const updateDataChannelReadyState = () => {
         if (!stopped && peerConnectionRef.current === peerConnection) {
-          setIsDataChannelOpen(true);
+          setIsDataChannelOpen(channel.readyState === 'open');
         }
       };
-      channel.onclose = () => {
-        if (peerConnectionRef.current === peerConnection) {
-          setIsDataChannelOpen(false);
-        }
-      };
+      channel.onopen = updateDataChannelReadyState;
+      channel.onclose = updateDataChannelReadyState;
+      channel.addEventListener('open', updateDataChannelReadyState);
+      channel.addEventListener('close', updateDataChannelReadyState);
+      updateDataChannelReadyState();
 
       peerConnection.ontrack = (event) => {
         if (stopped) return;
