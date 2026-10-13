@@ -9,10 +9,6 @@ interface GameItem {
   id: string;
   title: string;
   system: string;
-  systemColor: string;
-  coverStyle: string;
-  lastSaved?: string;
-  slotInfo?: string;
 }
 
 interface ActiveSession {
@@ -22,45 +18,56 @@ interface ActiveSession {
   game: GameItem;
 }
 
-const LIBRARY_GAMES: GameItem[] = [
-  {
-    id: 'snes_mario',
-    title: 'SUPER MARIO WORLD',
-    system: 'SNES',
-    systemColor: '#ff6d37',
-    coverStyle: 'cover-art--snes',
-    lastSaved: '2 MINS AGO',
-    slotInfo: 'SLOT 0 · LZ4 HOT TIER',
-  },
-  {
-    id: 'gba_pokemon',
-    title: 'POKÉMON EMERALD',
-    system: 'GBA',
-    systemColor: '#16b9e8',
-    coverStyle: 'cover-art--gba',
-  },
-  {
-    id: 'genesis_sonic',
-    title: 'SONIC THE HEDGEHOG 2',
-    system: 'GENESIS',
-    systemColor: '#ff397c',
-    coverStyle: 'cover-art--genesis',
-  },
-  {
-    id: 'nes_zelda',
-    title: 'THE LEGEND OF ZELDA',
-    system: 'NES',
-    systemColor: '#e9b943',
-    coverStyle: 'cover-art--nes',
-  },
-];
+function parseGameCatalog(value: unknown): GameItem[] {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('games' in value) ||
+    !Array.isArray(value.games)
+  ) {
+    throw new Error('The game catalog service returned an invalid response.');
+  }
+
+  return value.games.map((game: unknown) => {
+    if (
+      typeof game !== 'object' ||
+      game === null ||
+      !('id' in game) ||
+      typeof game.id !== 'string' ||
+      !('title' in game) ||
+      typeof game.title !== 'string' ||
+      !('system' in game) ||
+      typeof game.system !== 'string'
+    ) {
+      throw new Error('The game catalog service returned an invalid game.');
+    }
+
+    return {
+      id: game.id,
+      title: game.title,
+      system: game.system
+        .replace(/^libretro[_-]/i, '')
+        .replace(/[_-]+/g, ' ')
+        .toLocaleUpperCase(),
+    };
+  });
+}
+
+function getSystemColor(system: string): string {
+  let hash = 0;
+  for (const character of system) {
+    hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  }
+  return `hsl(${hash % 360} 75% 52%)`;
+}
 
 function getAccessToken(): string | null {
   return window.sessionStorage.getItem('cabinet.accessToken');
 }
 
 export function App() {
-  const [selectedGame, setSelectedGame] = useState<GameItem>(LIBRARY_GAMES[0]);
+  const [games, setGames] = useState<GameItem[]>([]);
+  const [selectedGame, setSelectedGame] = useState<GameItem | null>(null);
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(null);
   const [accessToken, setAccessToken] = useState<string | null>(getAccessToken);
   const [username, setUsername] = useState(
@@ -70,6 +77,8 @@ export function App() {
   const [systemFilter, setSystemFilter] = useState('ALL');
   const [launching, setLaunching] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [catalogError, setCatalogError] = useState('');
+  const [gamesLoading, setGamesLoading] = useState(false);
   const [notice, setNotice] = useState('');
   const [orchestratorStatus, setOrchestratorStatus] = useState<
     'checking' | 'online' | 'offline'
@@ -89,6 +98,9 @@ export function App() {
     setAccessToken(null);
     setUsername('');
     setActiveSession(null);
+    setGames([]);
+    setSelectedGame(null);
+    setCatalogError('');
     setErrorMessage('');
   };
 
@@ -109,10 +121,66 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!accessToken) return;
+
+    const controller = new AbortController();
+
+    const loadGames = async () => {
+      setGamesLoading(true);
+      setCatalogError('');
+      try {
+        const response = await fetch(`${ORCHESTRATOR_URL}/api/v1/games`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          signal: controller.signal,
+        });
+        const result: unknown = await response.json();
+        if (!response.ok) {
+          if (response.status === 401) {
+            window.sessionStorage.removeItem('cabinet.accessToken');
+            window.sessionStorage.removeItem('cabinet.username');
+            setAccessToken(null);
+            setUsername('');
+            setActiveSession(null);
+            setGames([]);
+            setSelectedGame(null);
+            setCatalogError('Your sign-in expired. Please sign in again.');
+            return;
+          }
+          const message =
+            typeof result === 'object' &&
+            result !== null &&
+            'error' in result &&
+            typeof result.error === 'string'
+              ? result.error
+              : `Game catalog request failed (${response.status})`;
+          throw new Error(message);
+        }
+
+        const catalog = parseGameCatalog(result);
+        setGames(catalog);
+        setSelectedGame((current) =>
+          catalog.find((game) => game.id === current?.id) ?? catalog[0] ?? null,
+        );
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.error('[Cabinet] Could not load the game catalog:', error);
+        setCatalogError(
+          error instanceof Error ? error.message : 'Could not load the game catalog.',
+        );
+      } finally {
+        if (!controller.signal.aborted) setGamesLoading(false);
+      }
+    };
+
+    void loadGames();
+    return () => controller.abort();
+  }, [accessToken]);
+
+  useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = remoteStream;
   }, [remoteStream]);
 
-  const visibleGames = LIBRARY_GAMES.filter((game) => {
+  const visibleGames = games.filter((game) => {
     const query = searchQuery.trim().toLocaleLowerCase();
     const matchesSearch =
       query.length === 0 ||
@@ -121,6 +189,7 @@ export function App() {
     const matchesSystem = systemFilter === 'ALL' || game.system === systemFilter;
     return matchesSearch && matchesSystem;
   });
+  const gameSystems = [...new Set(games.map((game) => game.system))].sort();
 
   const launchStream = async (game: GameItem) => {
     const token = accessToken;
@@ -237,8 +306,8 @@ export function App() {
               onChange={(event) => setSystemFilter(event.target.value)}
             >
               <option value="ALL">FILTERS</option>
-              {LIBRARY_GAMES.map((game) => (
-                <option value={game.system} key={game.system}>{game.system}</option>
+              {gameSystems.map((system) => (
+                <option value={system} key={system}>{system}</option>
               ))}
             </select>
             <span aria-hidden="true">▾</span>
@@ -262,7 +331,7 @@ export function App() {
             ) : (
               <div className="player-chip" aria-label="Player profile">
                 <span className="player-avatar" aria-hidden="true">P1</span>
-                <span className="player-rank">ELITE</span>
+                <span className="player-rank">PLAYER</span>
               </div>
             )}
           </div>
@@ -298,7 +367,6 @@ export function App() {
                 </div>
               )}
               <div className="stream-hud" aria-label="Stream diagnostics">
-                <span>FPS: <strong>60</strong></span>
                 <span>INPUT: <strong>{dataChannel?.readyState === 'open' ? 'READY' : 'WAITING'}</strong></span>
                 <span>ICE: <strong>{connectionStatus.toUpperCase()}</strong></span>
               </div>
@@ -306,67 +374,73 @@ export function App() {
           </section>
         ) : (
           <>
-            <section className="resume-section">
-              <div className="section-heading">
-                <h1>QUICK RESUME</h1>
-              </div>
+            {selectedGame && (
+              <section className="resume-section">
+                <div className="section-heading">
+                  <h1>FEATURED GAME</h1>
+                </div>
 
-              <article className="resume-card">
-                <div className="resume-art">
-                  <CoverArtwork game={selectedGame} featured />
-                </div>
-                <div className="resume-content">
-                  <div className="resume-title-line">
-                    <h2>{selectedGame.title}</h2>
-                    <span
-                      className="system-tag"
-                      style={{ backgroundColor: selectedGame.systemColor }}
-                    >
-                      {selectedGame.system}
-                    </span>
+                <article className="resume-card">
+                  <div className="resume-art">
+                    <CoverArtwork game={selectedGame} featured />
                   </div>
-                  <p className="save-detail">
-                    <span>LAST SAVED</span>
-                    <span>{selectedGame.lastSaved || 'READY TO PLAY'}</span>
-                    <span className="save-divider">•</span>
-                    <span>{selectedGame.slotInfo || 'SLOT 0 · READY'}</span>
-                  </p>
-                  <div className="resume-actions">
-                    <button
-                      className="button button--launch"
-                      onClick={() => void launchStream(selectedGame)}
-                      disabled={launching || orchestratorStatus !== 'online'}
-                    >
-                      {launching ? '◌ STARTING SESSION…' : '▶ LAUNCH INSTANT STREAM'}
-                    </button>
-                    <button
-                      className="button button--secondary"
-                      onClick={showInviteNotice}
-                      title="Couch co-op invites are not connected yet"
-                    >
-                      + COUCH INVITE
-                    </button>
+                  <div className="resume-content">
+                    <div className="resume-title-line">
+                      <h2>{selectedGame.title}</h2>
+                      <span
+                        className="system-tag"
+                        style={{ backgroundColor: getSystemColor(selectedGame.system) }}
+                      >
+                        {selectedGame.system}
+                      </span>
+                    </div>
+                    <p className="save-detail">
+                      <span>AVAILABLE TO PLAY</span>
+                      <span>{selectedGame.system}</span>
+                    </p>
+                    <div className="resume-actions">
+                      <button
+                        className="button button--launch"
+                        onClick={() => void launchStream(selectedGame)}
+                        disabled={launching || orchestratorStatus !== 'online'}
+                      >
+                        {launching ? '◌ STARTING SESSION…' : '▶ LAUNCH INSTANT STREAM'}
+                      </button>
+                      <button
+                        className="button button--secondary"
+                        onClick={showInviteNotice}
+                        title="Couch co-op invites are not connected yet"
+                      >
+                        + COUCH INVITE
+                      </button>
+                    </div>
                   </div>
-                </div>
-              </article>
-            </section>
+                </article>
+              </section>
+            )}
 
             <section className="library-section" aria-labelledby="library-heading">
               <div className="library-heading-row">
                 <h2 id="library-heading" className="section-title">
                   YOUR LIBRARY <span>/{visibleGames.length.toString().padStart(2, '0')}</span>
                 </h2>
-                <div className="library-metrics" aria-label="Performance indicators">
-                  <span>FPS: <strong>60</strong></span>
+                <div className="library-metrics" aria-label="Catalog statistics">
+                  <span>GAMES: <strong>{games.length}</strong></span>
                   <i />
-                  <span>PING: <strong>15ms</strong></span>
+                  <span>SYSTEMS: <strong>{gameSystems.length}</strong></span>
                 </div>
               </div>
 
-              {visibleGames.length > 0 ? (
+              {gamesLoading ? (
+                <p className="empty-library" role="status">LOADING GAME CATALOG…</p>
+              ) : catalogError ? (
+                <p className="empty-library" role="alert">GAME CATALOG UNAVAILABLE</p>
+              ) : games.length === 0 ? (
+                <p className="empty-library">NO GAMES IN THE CATALOG</p>
+              ) : visibleGames.length > 0 ? (
                 <div className="library-grid">
                   {visibleGames.map((game) => {
-                    const isSelected = selectedGame.id === game.id;
+                    const isSelected = selectedGame?.id === game.id;
                     return (
                       <article
                         className={`game-card${isSelected ? ' game-card--selected' : ''}`}
@@ -409,16 +483,17 @@ export function App() {
           </>
         )}
 
-        {(errorMessage || notice) && (
+        {(errorMessage || catalogError || notice) && (
           <div
-            className={`app-message${errorMessage ? ' app-message--error' : ''}`}
-            role={errorMessage ? 'alert' : 'status'}
+            className={`app-message${errorMessage || catalogError ? ' app-message--error' : ''}`}
+            role={errorMessage || catalogError ? 'alert' : 'status'}
           >
-            <span>{errorMessage || notice}</span>
+            <span>{errorMessage || catalogError || notice}</span>
             <button
               className="message-dismiss"
               onClick={() => {
                 setErrorMessage('');
+                setCatalogError('');
                 setNotice('');
               }}
               aria-label="Dismiss message"
@@ -448,7 +523,7 @@ export function App() {
 
 function CoverArtwork({ game, featured = false }: { game: GameItem; featured?: boolean }) {
   return (
-    <div className={`cover-art ${game.coverStyle}${featured ? ' cover-art--featured' : ''}`}>
+    <div className={`cover-art${featured ? ' cover-art--featured' : ''}`}>
       <span className="cover-spark cover-spark--one" />
       <span className="cover-spark cover-spark--two" />
       <span className="cover-spark cover-spark--three" />

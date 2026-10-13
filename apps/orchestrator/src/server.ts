@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { authRepository, type AuthRepository } from './db/authRepository.js';
 import { verifyDatabaseConnection } from './db/client.js';
+import { gamesRepository, type GamesRepository } from './db/gamesRepository.js';
 import { getSaveState, upsertSaveState } from './db/saveRepository.js';
 import { authRoutes } from './routes/auth.js';
 
@@ -45,6 +46,7 @@ const UUID_PATTERN =
 export async function buildServer(
   jwtSecret: string,
   users: AuthRepository = authRepository,
+  games: GamesRepository = gamesRepository,
 ) {
   if (jwtSecret.length < 32) {
     throw new Error('JWT_SECRET must be at least 32 characters');
@@ -109,6 +111,20 @@ export async function buildServer(
   };
 
   fastify.get('/health', async () => ({ status: 'OK', service: 'orchestrator' }));
+
+  fastify.get(
+    '/api/v1/games',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      try {
+        const catalog = await games.listGames();
+        return reply.send({ games: catalog });
+      } catch (error) {
+        request.log.error({ err: error }, '[Cabinet DB] Failed to query game catalog.');
+        return reply.code(503).send({ error: 'Game catalog is unavailable' });
+      }
+    },
+  );
 
   fastify.post(
     '/api/v1/saves/sync',

@@ -8,6 +8,7 @@ import type {
   AuthRepository,
   AuthUser,
 } from './db/authRepository.js';
+import type { GamesRepository } from './db/gamesRepository.js';
 import { buildServer } from './server.js';
 
 const JWT_SECRET = 'test-signaling-gateway-secret-that-is-at-least-32-characters';
@@ -125,6 +126,63 @@ test('requires JWT authentication before creating sessions', async () => {
       payload: { gameId: 'game-1' },
     });
     assert.equal(response.statusCode, 401);
+  } finally {
+    await app.close();
+  }
+});
+
+test('serves the database game catalog only to authenticated users', async () => {
+  const catalog = [
+    {
+      id: '550e8400-e29b-41d4-a716-446655440000',
+      title: 'Arcade Adventure',
+      system: 'libretro_snes',
+    },
+  ];
+  const repository: GamesRepository = {
+    async listGames() {
+      return catalog;
+    },
+  };
+  const app = await buildServer(JWT_SECRET, undefined, repository);
+  await app.ready();
+  try {
+    const unauthenticated = await app.inject({
+      method: 'GET',
+      url: '/api/v1/games',
+    });
+    assert.equal(unauthenticated.statusCode, 401);
+
+    const token = app.jwt.sign({ sub: 'user-1' });
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/v1/games',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), { games: catalog });
+  } finally {
+    await app.close();
+  }
+});
+
+test('reports game catalog database failures without returning a fake catalog', async () => {
+  const repository: GamesRepository = {
+    async listGames() {
+      throw new Error('database unavailable');
+    },
+  };
+  const app = await buildServer(JWT_SECRET, undefined, repository);
+  await app.ready();
+  try {
+    const token = app.jwt.sign({ sub: 'user-1' });
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/v1/games',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.statusCode, 503);
+    assert.deepEqual(response.json(), { error: 'Game catalog is unavailable' });
   } finally {
     await app.close();
   }
