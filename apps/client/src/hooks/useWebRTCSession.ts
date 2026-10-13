@@ -35,6 +35,11 @@ export function useWebRTCSession({
     const peerConnections = new Set<RTCPeerConnection>();
     const sockets = new Set<WebSocket>();
     const pendingCandidates: RTCIceCandidate[] = [];
+    const sendSignalingMessage = (activeSocket: WebSocket, payload: unknown) => {
+      if (activeSocket.readyState !== WebSocket.OPEN) return false;
+      activeSocket.send(JSON.stringify(payload));
+      return true;
+    };
 
     const closeSessionResources = () => {
       if (stopped) return;
@@ -76,6 +81,8 @@ export function useWebRTCSession({
 
     const connect = async (iceRestart = false) => {
       if (stopped) return;
+      signalingReady = false;
+      pendingCandidates.length = 0;
       setConnectionStatus(iceRestart ? 'reconnecting' : 'connecting');
       peerConnection = new RTCPeerConnection({
         iceServers: [
@@ -117,9 +124,9 @@ export function useWebRTCSession({
           sdpMid: event.candidate.sdpMid,
           sdpMLineIndex: event.candidate.sdpMLineIndex,
         };
-        if (signalingReady && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify(candidate));
-        } else {
+        if (signalingReady) {
+          sendSignalingMessage(socket, candidate);
+        } else if (socket.readyState === WebSocket.CONNECTING) {
           pendingCandidates.push(event.candidate);
         }
       };
@@ -139,7 +146,7 @@ export function useWebRTCSession({
             reconnectTimer = window.setTimeout(async () => {
               reconnectTimer = undefined;
               await reportSessionState('reconnect');
-              socket.close();
+              if (socket.readyState < WebSocket.CLOSING) socket.close();
               peerConnection.close();
               if (!stopped) void connect(true);
             }, 2_000);
@@ -164,22 +171,22 @@ export function useWebRTCSession({
           if (stopped) return;
           const sdp = peerConnection.localDescription?.sdp;
           if (!sdp) throw new Error('Peer connection did not produce an SDP offer');
-          socket.send(JSON.stringify({ type: 'offer', sdp }));
+          if (!sendSignalingMessage(socket, { type: 'offer', sdp })) return;
           signalingReady = true;
           for (const candidate of pendingCandidates.splice(0)) {
-            socket.send(
-              JSON.stringify({
+            if (
+              !sendSignalingMessage(socket, {
                 type: 'candidate',
                 candidate: candidate.candidate,
                 sdpMid: candidate.sdpMid,
                 sdpMLineIndex: candidate.sdpMLineIndex,
-              }),
-            );
+              })
+            ) break;
           }
         } catch (error) {
           console.error('[Cabinet] Could not create WebRTC offer:', error);
           setConnectionStatus('offer-error');
-          socket.close();
+          if (socket.readyState < WebSocket.CLOSING) socket.close();
         }
       };
 

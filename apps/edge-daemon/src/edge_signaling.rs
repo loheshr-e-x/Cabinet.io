@@ -23,7 +23,7 @@ struct EdgeSessionClaims {
     token_type: String,
     session_id: String,
     user_id: String,
-    game_id: String,
+    game_id: Option<String>,
     rom_key: String,
     system_core: String,
     exp: usize,
@@ -45,22 +45,17 @@ pub async fn serve(listener: TcpListener) -> Result<(), std::io::Error> {
 }
 
 async fn handle_connection(stream: TcpStream) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let token = Arc::new(std::sync::Mutex::new(None::<String>));
-    let token_for_handshake = Arc::clone(&token);
+    let session_query = Arc::new(std::sync::Mutex::new(None::<(String, Option<String>)>));
+    let query_for_handshake = Arc::clone(&session_query);
     let socket = accept_hdr_async(
         stream,
         move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
               response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-            let extracted = request
-                .uri()
-                .query()
-                .into_iter()
-                .flat_map(|query| form_urlencoded::parse(query.as_bytes()))
-                .find_map(|(key, value)| (key == "token").then(|| value.into_owned()));
-            if let Some(value) = extracted {
-                *token_for_handshake
+            let (token, game_id) = parse_session_query(request.uri().query());
+            if let Some(token) = token {
+                *query_for_handshake
                     .lock()
-                    .expect("handshake token mutex poisoned") = Some(value);
+                    .expect("handshake query mutex poisoned") = Some((token, game_id));
                 Ok(response)
             } else {
                 Err(tokio_tungstenite::tungstenite::http::Response::builder()
@@ -71,9 +66,9 @@ async fn handle_connection(stream: TcpStream) -> Result<(), Box<dyn Error + Send
         },
     )
     .await?;
-    let token = token
+    let (token, query_game_id) = session_query
         .lock()
-        .map_err(|_| "session token mutex poisoned")?
+        .map_err(|_| "session query mutex poisoned")?
         .take()
         .ok_or("session token missing from WebSocket handshake")?;
     let secret = env::var("JWT_SECRET")?;
@@ -86,13 +81,17 @@ async fn handle_connection(stream: TcpStream) -> Result<(), Box<dyn Error + Send
     if claims.token_type != "edge-session"
         || claims.session_id.is_empty()
         || claims.user_id.is_empty()
-        || claims.game_id.is_empty()
         || claims.rom_key.is_empty()
         || claims.system_core.is_empty()
         || claims.exp == 0
     {
         return Err("invalid edge session claims".into());
     }
+    let game_id = claims
+        .game_id
+        .filter(|game_id| !game_id.is_empty())
+        .or(query_game_id)
+        .unwrap_or_default();
 
     let rom = download_rom(&claims.rom_key).await?;
     println!(
@@ -115,21 +114,20 @@ async fn handle_connection(stream: TcpStream) -> Result<(), Box<dyn Error + Send
     )?;
 
     let save_state_manager = SaveStateManager::from_env()?.map(Arc::new);
-    if let Some(manager) = &save_state_manager {
-        match manager
-            .load_state(&claims.user_id, &claims.game_id, 0)
-            .await
-        {
+    if game_id.is_empty() {
+        eprintln!("[Cabinet Save] Automatic restore skipped because the session has no game ID.");
+    } else if let Some(manager) = &save_state_manager {
+        match manager.load_state(&claims.user_id, &game_id, 0).await {
             Ok(Some(state)) => match emulator.load_state(&state) {
                 Ok(()) => println!(
                     "[Cabinet Save] Restored saved state for user {} and game {}.",
-                    claims.user_id, claims.game_id
+                    claims.user_id, game_id
                 ),
                 Err(error) => eprintln!("[Cabinet Save] Stored state could not be loaded: {error}"),
             },
             Ok(None) => println!(
                 "[Cabinet Save] No stored state found for user {} and game {}.",
-                claims.user_id, claims.game_id
+                claims.user_id, game_id
             ),
             Err(error) => eprintln!("[Cabinet Save] Automatic restore failed: {error}"),
         }
@@ -148,9 +146,25 @@ async fn handle_connection(stream: TcpStream) -> Result<(), Box<dyn Error + Send
         emulator,
         save_state_manager,
         claims.user_id,
-        claims.game_id,
+        game_id,
     )
     .await
+}
+
+fn parse_session_query(query: Option<&str>) -> (Option<String>, Option<String>) {
+    let mut token = None;
+    let mut game_id = None;
+    for (key, value) in query
+        .into_iter()
+        .flat_map(|query| form_urlencoded::parse(query.as_bytes()))
+    {
+        match key.as_ref() {
+            "token" => token = Some(value.into_owned()),
+            "gameId" => game_id = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    (token, game_id)
 }
 
 async fn handle_signaling(
@@ -210,15 +224,16 @@ async fn handle_signaling_loop(
             command = save_state_commands.recv(), if answered && !save_state_commands.is_closed() => {
                 match command {
                     Some(crate::webrtc_stream::SaveStateCommand::Save(channel)) => {
-                        let result = match (&save_state_manager, emulator.save_state()) {
-                            (Some(manager), Ok(state)) => {
+                        let result = match (&save_state_manager, game_id.is_empty(), emulator.save_state()) {
+                            (_, true, _) => Err("Cannot persist a save state without a game ID.".into()),
+                            (Some(manager), false, Ok(state)) => {
                                 manager
                                     .capture_and_sync_state(user_id, game_id, 0, &state)
                                     .await
                                     .map(|size| format!("Save state persisted ({size} bytes)."))
                             }
-                            (None, _) => Err("Persistent save states are not configured.".into()),
-                            (_, Err(error)) => Err(error.into()),
+                            (None, _, _) => Err("Persistent save states are not configured.".into()),
+                            (_, _, Err(error)) => Err(error.into()),
                         };
                         let (success, message) = match result {
                             Ok(message) => (true, message),
@@ -232,15 +247,16 @@ async fn handle_signaling_loop(
                         }).to_string()).await?;
                     }
                     Some(crate::webrtc_stream::SaveStateCommand::Load(channel)) => {
-                        let result = match &save_state_manager {
-                            Some(manager) => match manager.load_state(user_id, game_id, 0).await {
+                        let result = match (game_id.is_empty(), &save_state_manager) {
+                            (true, _) => Err("Cannot load a save state without a game ID.".to_string()),
+                            (false, Some(manager)) => match manager.load_state(user_id, game_id, 0).await {
                                 Ok(Some(state)) => emulator
                                     .load_state(&state)
                                     .map(|()| format!("Save state loaded ({} bytes).", state.len())),
                                 Ok(None) => Err("No persistent save state exists for this game.".to_string()),
                                 Err(error) => Err(error.to_string()),
                             },
-                            None => Err("Persistent save states are not configured.".to_string()),
+                            (false, None) => Err("Persistent save states are not configured.".to_string()),
                         };
                         let (success, message) = match result {
                             Ok(message) => (true, message),
@@ -323,4 +339,36 @@ async fn handle_signaling_loop(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_edge_session_claims_without_game_id() {
+        let claims: EdgeSessionClaims = serde_json::from_str(
+            r#"{
+                "tokenType":"edge-session",
+                "sessionId":"session-test",
+                "userId":"user-test",
+                "romKey":"roms/test.nes",
+                "systemCore":"fceumm",
+                "exp":1
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(claims.game_id, None);
+    }
+
+    #[test]
+    fn extracts_optional_game_id_from_session_query() {
+        let (token, game_id) = parse_session_query(Some("token=valid-token&gameId=game-123"));
+
+        assert_eq!(token.as_deref(), Some("valid-token"));
+        assert_eq!(game_id.as_deref(), Some("game-123"));
+        assert_eq!(parse_session_query(Some("token=valid-token")).1, None);
+        assert_eq!(parse_session_query(None), (None, None));
+    }
 }
