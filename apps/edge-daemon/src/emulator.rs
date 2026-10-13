@@ -304,10 +304,12 @@ impl EmulatorInstance {
             unsafe { run() };
         }
     }
-}
 
-impl Drop for EmulatorInstance {
-    fn drop(&mut self) {
+    pub fn unload_core(&mut self) {
+        if !self.owns_active_core {
+            return;
+        }
+
         if let Some(unload) = self.core_unload_game.take() {
             unsafe { unload() };
         }
@@ -315,6 +317,7 @@ impl Drop for EmulatorInstance {
             unsafe { deinit() };
         }
         self.core_run = None;
+        self.serializer = None;
         self.library.take();
         self.rom.clear();
         self.game_path.take();
@@ -324,15 +327,20 @@ impl Drop for EmulatorInstance {
             }
         }
 
-        if self.owns_active_core {
-            if let Ok(mut target) = callback_frame_buffer().lock() {
-                *target = None;
-            }
-            if let Ok(mut target) = callback_input_state().lock() {
-                *target = None;
-            }
-            ACTIVE_CORE.store(false, Ordering::Release);
+        if let Ok(mut target) = callback_frame_buffer().lock() {
+            *target = None;
         }
+        if let Ok(mut target) = callback_input_state().lock() {
+            *target = None;
+        }
+        self.owns_active_core = false;
+        ACTIVE_CORE.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for EmulatorInstance {
+    fn drop(&mut self) {
+        self.unload_core();
     }
 }
 
@@ -472,6 +480,19 @@ mod tests {
         assert!(emulator.load_state(&[1, 2, 3, 4]).is_ok());
         assert!(emulator.load_state(&[1, 2]).is_err());
         assert!(emulator.load_state(&[]).is_err());
+    }
+
+    #[test]
+    fn explicitly_unloading_core_releases_active_core_lock_idempotently() {
+        ACTIVE_CORE.store(true, Ordering::Release);
+        let mut emulator = EmulatorInstance::new(1, 1);
+        emulator.owns_active_core = true;
+
+        emulator.unload_core();
+        assert!(!ACTIVE_CORE.load(Ordering::Acquire));
+
+        emulator.unload_core();
+        assert!(!ACTIVE_CORE.load(Ordering::Acquire));
     }
 
     #[test]

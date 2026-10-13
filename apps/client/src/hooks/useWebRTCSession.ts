@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ORCHESTRATOR_URL } from '../config';
 
 interface UseWebRTCSessionOptions {
@@ -17,7 +17,9 @@ export function useWebRTCSession({
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const closeSessionRef = useRef<() => void>(() => {});
   const hasActiveSession = Boolean(sessionId && token && edgeWsUrl);
+  const closeSession = useCallback(() => closeSessionRef.current(), []);
 
   useEffect(() => {
     if (!sessionId || !token || !edgeWsUrl) {
@@ -30,7 +32,26 @@ export function useWebRTCSession({
     let socket: WebSocket;
     let disconnectNotified = false;
     let signalingReady = false;
+    const peerConnections = new Set<RTCPeerConnection>();
+    const sockets = new Set<WebSocket>();
     const pendingCandidates: RTCIceCandidate[] = [];
+
+    const closeSessionResources = () => {
+      if (stopped) return;
+      stopped = true;
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      setDataChannel(null);
+      setRemoteStream(null);
+      for (const connection of peerConnections) {
+        if (connection.signalingState !== 'closed') connection.close();
+      }
+      for (const activeSocket of sockets) {
+        if (activeSocket.readyState < WebSocket.CLOSING) activeSocket.close();
+      }
+      peerConnectionRef.current = null;
+      wsRef.current = null;
+    };
+    closeSessionRef.current = closeSessionResources;
 
     const reportSessionState = async (action: 'disconnect' | 'reconnect') => {
       try {
@@ -63,12 +84,14 @@ export function useWebRTCSession({
         ],
       });
       peerConnectionRef.current = peerConnection;
+      peerConnections.add(peerConnection);
       peerConnection.addTransceiver('video', { direction: 'recvonly' });
       peerConnection.addTransceiver('audio', { direction: 'recvonly' });
       const channel = peerConnection.createDataChannel('input');
       setDataChannel(channel);
 
       peerConnection.ontrack = (event) => {
+        if (stopped) return;
         console.info('[Cabinet UI] Incoming track received:', event.track.kind);
         setRemoteStream((stream) => {
           const incomingStream = event.streams[0];
@@ -83,8 +106,10 @@ export function useWebRTCSession({
 
       socket = new WebSocket(edgeWsUrl);
       wsRef.current = socket;
+      sockets.add(socket);
 
       peerConnection.onicecandidate = (event) => {
+        if (stopped) return;
         if (!event.candidate) return;
         const candidate = {
           type: 'candidate',
@@ -100,6 +125,7 @@ export function useWebRTCSession({
       };
 
       peerConnection.oniceconnectionstatechange = () => {
+        if (stopped) return;
         setConnectionStatus(peerConnection.iceConnectionState);
         if (
           peerConnection.iceConnectionState === 'disconnected' ||
@@ -130,9 +156,12 @@ export function useWebRTCSession({
       };
 
       socket.onopen = async () => {
+        if (stopped) return;
         try {
           const offer = await peerConnection.createOffer({ iceRestart });
+          if (stopped) return;
           await peerConnection.setLocalDescription(offer);
+          if (stopped) return;
           const sdp = peerConnection.localDescription?.sdp;
           if (!sdp) throw new Error('Peer connection did not produce an SDP offer');
           socket.send(JSON.stringify({ type: 'offer', sdp }));
@@ -190,7 +219,9 @@ export function useWebRTCSession({
         }
       };
 
-      socket.onerror = () => setConnectionStatus('signaling-error');
+      socket.onerror = () => {
+        if (!stopped) setConnectionStatus('signaling-error');
+      };
       socket.onclose = () => {
         if (!stopped) setConnectionStatus('signaling-disconnected');
       };
@@ -199,14 +230,10 @@ export function useWebRTCSession({
     void connect();
 
     return () => {
-      stopped = true;
-      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
-      setDataChannel(null);
-      setRemoteStream(null);
-      peerConnectionRef.current?.close();
-      wsRef.current?.close();
-      peerConnectionRef.current = null;
-      wsRef.current = null;
+      closeSessionResources();
+      if (closeSessionRef.current === closeSessionResources) {
+        closeSessionRef.current = () => {};
+      }
     };
   }, [sessionId, token, edgeWsUrl]);
 
@@ -215,5 +242,6 @@ export function useWebRTCSession({
     dataChannel: hasActiveSession ? dataChannel : null,
     remoteStream: hasActiveSession ? remoteStream : null,
     peerConnectionRef,
+    closeSession,
   };
 }

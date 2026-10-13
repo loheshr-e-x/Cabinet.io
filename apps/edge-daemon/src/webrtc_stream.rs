@@ -8,6 +8,7 @@ use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
@@ -19,6 +20,7 @@ pub struct WebRTCBroadcaster {
     pub video_track: Arc<TrackLocalStaticSample>,
     video_encoder_sender: mpsc::Sender<VideoFrameRequest>,
     save_state_commands: Option<mpsc::UnboundedReceiver<SaveStateCommand>>,
+    peer_state_changes: Option<mpsc::UnboundedReceiver<RTCPeerConnectionState>>,
 }
 
 pub enum SaveStateCommand {
@@ -44,6 +46,7 @@ impl WebRTCBroadcaster {
         input_state: Arc<std::sync::Mutex<u16>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (save_state_sender, save_state_commands) = mpsc::unbounded_channel();
+        let (peer_state_sender, peer_state_changes) = mpsc::unbounded_channel();
         let mut media_engine = MediaEngine::default();
 
         // Register VP8 Video Codec
@@ -61,6 +64,17 @@ impl WebRTCBroadcaster {
             ..Default::default()
         };
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
+        peer_connection.on_peer_connection_state_change(Box::new(move |state| {
+            if matches!(
+                state,
+                RTCPeerConnectionState::Failed
+                    | RTCPeerConnectionState::Closed
+                    | RTCPeerConnectionState::Disconnected
+            ) {
+                let _ = peer_state_sender.send(state);
+            }
+            Box::pin(async {})
+        }));
 
         peer_connection.on_data_channel(Box::new(move |data_channel: Arc<RTCDataChannel>| {
             let input_state = Arc::clone(&input_state);
@@ -152,6 +166,7 @@ impl WebRTCBroadcaster {
             video_track,
             video_encoder_sender,
             save_state_commands: Some(save_state_commands),
+            peer_state_changes: Some(peer_state_changes),
         })
     }
 
@@ -159,6 +174,12 @@ impl WebRTCBroadcaster {
         self.save_state_commands
             .take()
             .expect("save-state command receiver already taken")
+    }
+
+    pub fn take_peer_state_changes(&mut self) -> mpsc::UnboundedReceiver<RTCPeerConnectionState> {
+        self.peer_state_changes
+            .take()
+            .expect("peer state receiver already taken")
     }
 
     pub async fn send_video_frame(

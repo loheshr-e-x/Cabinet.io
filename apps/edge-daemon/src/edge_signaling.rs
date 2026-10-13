@@ -122,11 +122,26 @@ async fn handle_signaling(
     mut broadcaster: WebRTCBroadcaster,
     mut emulator: crate::emulator::EmulatorInstance,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let peer_connection = Arc::clone(&broadcaster.peer_connection);
+    let result = handle_signaling_loop(&mut socket, &mut broadcaster, &mut emulator).await;
+    emulator.unload_core();
+    let close_result = peer_connection.close().await;
+    result?;
+    close_result?;
+    Ok(())
+}
+
+async fn handle_signaling_loop(
+    socket: &mut WebSocketStream<TcpStream>,
+    broadcaster: &mut WebRTCBroadcaster,
+    emulator: &mut crate::emulator::EmulatorInstance,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut answered = false;
     let mut frame_ticker = interval(Duration::from_micros(16_667));
     let mut last_frame_number = 0;
     let frame_buffer = emulator.get_frame_buffer();
     let mut save_state_commands = broadcaster.take_save_state_commands();
+    let mut peer_state_changes = broadcaster.take_peer_state_changes();
     let mut saved_state: Option<Vec<u8>> = None;
     loop {
         tokio::select! {
@@ -180,6 +195,12 @@ async fn handle_signaling(
                         }).to_string()).await?;
                     }
                     None => {}
+                }
+            }
+            state = peer_state_changes.recv(), if !peer_state_changes.is_closed() => {
+                if let Some(state) = state {
+                    eprintln!("[Cabinet Edge] PeerConnection entered terminal state {state}; unloading core.");
+                    break;
                 }
             }
             incoming = socket.next() => {
@@ -242,6 +263,5 @@ async fn handle_signaling(
         }
     }
 
-    broadcaster.peer_connection.close().await?;
     Ok(())
 }

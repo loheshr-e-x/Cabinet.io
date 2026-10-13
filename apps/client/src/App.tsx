@@ -111,7 +111,7 @@ export function App() {
   const streamViewRef = useRef<HTMLElement | null>(null);
   const touchControlsEnabled = touchControlsOverride ?? isTouchDevice;
 
-  const { connectionStatus, dataChannel, remoteStream } = useWebRTCSession({
+  const { connectionStatus, dataChannel, remoteStream, closeSession } = useWebRTCSession({
     sessionId: activeSession?.sessionId ?? null,
     token: activeSession?.token ?? null,
     edgeWsUrl: activeSession?.edgeWsUrl ?? null,
@@ -227,6 +227,7 @@ export function App() {
   };
 
   const signOut = () => {
+    closeSession();
     window.sessionStorage.removeItem('cabinet.accessToken');
     window.sessionStorage.removeItem('cabinet.username');
     setAccessToken(null);
@@ -390,6 +391,7 @@ export function App() {
   };
 
   const exitStream = () => {
+    closeSession();
     setActiveSession(null);
     setErrorMessage('');
     setAudioError('');
