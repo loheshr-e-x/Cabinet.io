@@ -2,14 +2,17 @@ use crate::frame_buffer::FrameBuffer;
 use libloading::Library;
 use rust_libretro_sys as libretro;
 use std::ffi::CString;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::os::raw::{c_uint, c_void};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 type RetroInit = unsafe extern "C" fn();
 type RetroDeinit = unsafe extern "C" fn();
 type RetroRun = unsafe extern "C" fn();
+type RetroGetSystemInfo = unsafe extern "C" fn(*mut libretro::retro_system_info);
 type RetroLoadGame = unsafe extern "C" fn(*const libretro::retro_game_info) -> bool;
 type RetroUnloadGame = unsafe extern "C" fn();
 type RetroSetEnvironment = unsafe extern "C" fn(libretro::retro_environment_t);
@@ -19,6 +22,7 @@ type RetroSetInputPoll = unsafe extern "C" fn(libretro::retro_input_poll_t);
 type RetroSetInputState = unsafe extern "C" fn(libretro::retro_input_state_t);
 
 static ACTIVE_CORE: AtomicBool = AtomicBool::new(false);
+static TEMP_ROM_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static CALLBACK_FRAME_BUFFER: std::sync::OnceLock<Mutex<Option<Arc<Mutex<FrameBuffer>>>>> =
     std::sync::OnceLock::new();
 
@@ -52,6 +56,7 @@ pub struct EmulatorInstance {
     core_deinit: Option<RetroDeinit>,
     rom: Vec<u8>,
     game_path: Option<CString>,
+    temporary_rom_path: Option<PathBuf>,
     owns_active_core: bool,
     serializer: Option<LibretroSerializer>,
 }
@@ -68,6 +73,7 @@ impl EmulatorInstance {
             core_deinit: None,
             rom: Vec::new(),
             game_path: None,
+            temporary_rom_path: None,
             owns_active_core: false,
             serializer: None,
         }
@@ -75,7 +81,6 @@ impl EmulatorInstance {
 
     pub fn load_core(
         core_path: &Path,
-        game_path: &str,
         rom: Vec<u8>,
         max_width: u32,
         max_height: u32,
@@ -90,7 +95,7 @@ impl EmulatorInstance {
             return Err("the edge daemon supports one active Libretro core at a time".into());
         }
 
-        let result = Self::load_core_inner(core_path, game_path, rom, max_width, max_height);
+        let result = Self::load_core_inner(core_path, rom, max_width, max_height);
         if result.is_err() {
             ACTIVE_CORE.store(false, Ordering::Release);
         }
@@ -99,7 +104,6 @@ impl EmulatorInstance {
 
     fn load_core_inner(
         core_path: &Path,
-        game_path: &str,
         rom: Vec<u8>,
         max_width: u32,
         max_height: u32,
@@ -108,6 +112,8 @@ impl EmulatorInstance {
         let retro_init = unsafe { *library.get::<RetroInit>(b"retro_init\0")? };
         let retro_deinit = unsafe { *library.get::<RetroDeinit>(b"retro_deinit\0")? };
         let retro_run = unsafe { *library.get::<RetroRun>(b"retro_run\0")? };
+        let retro_get_system_info =
+            unsafe { *library.get::<RetroGetSystemInfo>(b"retro_get_system_info\0")? };
         let retro_load_game = unsafe { *library.get::<RetroLoadGame>(b"retro_load_game\0")? };
         let retro_unload_game = unsafe { *library.get::<RetroUnloadGame>(b"retro_unload_game\0")? };
         let set_environment =
@@ -120,7 +126,25 @@ impl EmulatorInstance {
             unsafe { *library.get::<RetroSetInputPoll>(b"retro_set_input_poll\0")? };
         let set_input_state =
             unsafe { *library.get::<RetroSetInputState>(b"retro_set_input_state\0")? };
-        let game_path = CString::new(game_path)?;
+
+        let virtual_game_path = CString::new("game.nes")?;
+        let mut system_info = libretro::retro_system_info {
+            library_name: std::ptr::null(),
+            library_version: std::ptr::null(),
+            valid_extensions: std::ptr::null(),
+            need_fullpath: false,
+            block_extract: false,
+        };
+        unsafe { retro_get_system_info(&mut system_info) };
+        let temporary_rom_path = if system_info.need_fullpath {
+            Some(write_temporary_rom(&rom)?)
+        } else {
+            None
+        };
+        let game_path = match temporary_rom_path.as_ref() {
+            Some(path) => CString::new(path.to_string_lossy().as_bytes())?,
+            None => virtual_game_path,
+        };
 
         let frame_buffer = Arc::new(Mutex::new(FrameBuffer::new(max_width, max_height, 2048)));
         {
@@ -141,8 +165,16 @@ impl EmulatorInstance {
 
         let game = libretro::retro_game_info {
             path: game_path.as_ptr(),
-            data: rom.as_ptr().cast::<c_void>(),
-            size: rom.len(),
+            data: if temporary_rom_path.is_some() {
+                std::ptr::null()
+            } else {
+                rom.as_ptr().cast::<c_void>()
+            },
+            size: if temporary_rom_path.is_some() {
+                0
+            } else {
+                rom.len()
+            },
             meta: std::ptr::null(),
         };
         if !unsafe { retro_load_game(&game) } {
@@ -150,7 +182,15 @@ impl EmulatorInstance {
             if let Ok(mut target) = callback_frame_buffer().lock() {
                 *target = None;
             }
-            return Err("Libretro core rejected the ROM".into());
+            if let Some(path) = &temporary_rom_path {
+                let _ = fs::remove_file(path);
+            }
+            return Err(format!(
+                "Libretro core rejected ROM {game_path:?} ({} bytes, need_fullpath={})",
+                rom.len(),
+                system_info.need_fullpath
+            )
+            .into());
         }
 
         let serializer = unsafe {
@@ -172,6 +212,7 @@ impl EmulatorInstance {
             core_deinit: Some(retro_deinit),
             rom,
             game_path: Some(game_path),
+            temporary_rom_path,
             owns_active_core: true,
             serializer,
         })
@@ -224,6 +265,11 @@ impl Drop for EmulatorInstance {
         self.library.take();
         self.rom.clear();
         self.game_path.take();
+        if let Some(path) = self.temporary_rom_path.take() {
+            if let Err(error) = fs::remove_file(path) {
+                eprintln!("[Cabinet Edge] Failed to remove temporary ROM file: {error}");
+            }
+        }
 
         if self.owns_active_core {
             if let Ok(mut target) = callback_frame_buffer().lock() {
@@ -232,6 +278,32 @@ impl Drop for EmulatorInstance {
             ACTIVE_CORE.store(false, Ordering::Release);
         }
     }
+}
+
+fn write_temporary_rom(rom: &[u8]) -> Result<PathBuf, std::io::Error> {
+    let temp_dir = std::env::temp_dir();
+    for _ in 0..10 {
+        let sequence = TEMP_ROM_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = temp_dir.join(format!(
+            "cabinet-edge-{}-{sequence}.nes",
+            std::process::id()
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(rom) {
+                    let _ = fs::remove_file(&path);
+                    return Err(error);
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique temporary ROM path",
+    ))
 }
 
 unsafe extern "C" fn environment_callback(command: c_uint, data: *mut c_void) -> bool {
@@ -328,5 +400,18 @@ mod tests {
         assert_eq!(captured.frame_number, 1);
         assert_eq!(&captured.video_buffer[..8], &frame);
         *callback_frame_buffer().lock().unwrap() = None;
+    }
+
+    #[test]
+    fn writes_fullpath_rom_to_a_nes_named_temporary_file() {
+        let rom = [1_u8, 2, 3, 4];
+        let path = write_temporary_rom(&rom).unwrap();
+
+        assert_eq!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("nes")
+        );
+        assert_eq!(fs::read(&path).unwrap(), rom);
+        fs::remove_file(path).unwrap();
     }
 }

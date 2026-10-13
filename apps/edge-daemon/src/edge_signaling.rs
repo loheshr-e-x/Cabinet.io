@@ -111,19 +111,8 @@ async fn handle_connection(
 
     let core_path = env::var("LIBRETRO_CORE_PATH")
         .map_err(|_| "LIBRETRO_CORE_PATH must point to an installed Libretro shared library")?;
-    let rom_filename = claims
-        .rom_key
-        .rsplit('/')
-        .next()
-        .filter(|filename| !filename.is_empty())
-        .ok_or("ROM key must include a filename")?;
-    let emulator = crate::emulator::EmulatorInstance::load_core(
-        Path::new(&core_path),
-        rom_filename,
-        rom,
-        1920,
-        1080,
-    )?;
+    let emulator =
+        crate::emulator::EmulatorInstance::load_core(Path::new(&core_path), rom, 1920, 1080)?;
 
     let broadcaster = WebRTCBroadcaster::new(input_sender)
         .await
