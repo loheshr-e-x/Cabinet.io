@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AuthModal } from './components/AuthModal';
 import { ORCHESTRATOR_URL } from './config';
 import { useInputHandler } from './hooks/useInputHandler';
@@ -91,6 +91,13 @@ export function App() {
     edgeWsUrl: activeSession?.edgeWsUrl ?? null,
   });
   useInputHandler(dataChannel);
+  const bindVideoElement = useCallback(
+    (video: HTMLVideoElement | null) => {
+      videoRef.current = video;
+      if (video) video.srcObject = remoteStream;
+    },
+    [remoteStream],
+  );
 
   const signOut = () => {
     window.sessionStorage.removeItem('cabinet.accessToken');
@@ -353,10 +360,17 @@ export function App() {
             </div>
             <div className="stream-viewport">
               <video
-                ref={videoRef}
+                ref={bindVideoElement}
                 autoPlay
                 playsInline
                 muted
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  minWidth: '320px',
+                  minHeight: '240px',
+                  backgroundColor: '#000',
+                }}
                 aria-label={`${activeSession.game.title} video stream`}
               />
               {!remoteStream && (

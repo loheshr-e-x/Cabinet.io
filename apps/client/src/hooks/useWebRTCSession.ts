@@ -69,7 +69,16 @@ export function useWebRTCSession({
       setDataChannel(channel);
 
       peerConnection.ontrack = (event) => {
-        setRemoteStream(event.streams[0] ?? new MediaStream([event.track]));
+        console.info('[Cabinet UI] Incoming track received:', event.track.kind);
+        setRemoteStream((stream) => {
+          const incomingStream = event.streams[0];
+          if (incomingStream) return incomingStream;
+          if (stream) {
+            stream.addTrack(event.track);
+            return stream;
+          }
+          return new MediaStream([event.track]);
+        });
       };
 
       socket = new WebSocket(edgeWsUrl);
