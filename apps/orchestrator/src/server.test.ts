@@ -14,13 +14,14 @@ import { buildServer } from './server.js';
 const JWT_SECRET = 'test-signaling-gateway-secret-that-is-at-least-32-characters';
 const TEST_GAME_ID = '550e8400-e29b-41d4-a716-446655440000';
 const TEST_USER_ID = '550e8400-e29b-41d4-a716-446655440001';
+const TEST_ROM_R2_KEY = 'roms/2048 (World) (Rev 5) (Aftermarket) (Unl).nes';
 const testGamesRepository: GamesRepository = {
   async listGames() {
-    return [];
+    return [{ id: TEST_GAME_ID, title: '2048 - renamed display title', system: 'fceumm' }];
   },
   async getLaunchDetails(gameId) {
     return gameId === TEST_GAME_ID
-      ? { id: TEST_GAME_ID, systemCore: 'nes', romR2Key: 'roms/test-game.nes' }
+      ? { id: TEST_GAME_ID, systemCore: 'fceumm', romR2Key: TEST_ROM_R2_KEY }
       : null;
   },
 };
@@ -297,8 +298,8 @@ test('allows owner to start, disconnect, and reconnect a session', async () => {
     assert.equal(sessionClaims.sessionId, body.sessionId);
     assert.equal(sessionClaims.userId, TEST_USER_ID);
     assert.equal(sessionClaims.gameId, TEST_GAME_ID);
-    assert.equal(sessionClaims.romKey, 'roms/test-game.nes');
-    assert.equal(sessionClaims.systemCore, 'nes');
+    assert.equal(sessionClaims.romKey, TEST_ROM_R2_KEY);
+    assert.equal(sessionClaims.systemCore, 'fceumm');
 
     const disconnected = await app.inject({
       method: 'POST',

@@ -20,8 +20,23 @@ pub async fn download_rom(object_key: &str) -> Result<Vec<u8>, Box<dyn Error + S
         .bucket(bucket)
         .key(object_key)
         .send()
-        .await?;
-    let bytes = response.body.collect().await?.into_bytes().to_vec();
+        .await
+        .map_err(|error| {
+            std::io::Error::other(format!(
+                "R2 GetObject failed for key '{object_key}': {error:?}"
+            ))
+        })?;
+    let bytes = response
+        .body
+        .collect()
+        .await
+        .map_err(|error| {
+            std::io::Error::other(format!(
+                "failed to read R2 response body for key '{object_key}': {error:?}"
+            ))
+        })?
+        .into_bytes()
+        .to_vec();
     if bytes.is_empty() {
         return Err("R2 ROM object is empty".into());
     }

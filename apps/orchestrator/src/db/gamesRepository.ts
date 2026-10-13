@@ -29,6 +29,7 @@ export const gamesRepository: GamesRepository = {
 
   async getLaunchDetails(gameId) {
     const result = await db.query<GameLaunchDetails>(
+      // Launch metadata is read from its own column; display-title edits cannot derive or replace this key.
       `SELECT id::text, system_core AS "systemCore", rom_r2_key AS "romR2Key"
        FROM games
        WHERE id = $1`,

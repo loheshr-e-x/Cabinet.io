@@ -93,7 +93,13 @@ async fn handle_connection(stream: TcpStream) -> Result<(), Box<dyn Error + Send
         .or(query_game_id)
         .unwrap_or_default();
 
-    let rom = download_rom(&claims.rom_key).await?;
+    let rom = download_rom(&claims.rom_key).await.map_err(|error| {
+        eprintln!(
+            "[Cabinet Edge] Failed to fetch ROM from R2 key '{}': {error}",
+            claims.rom_key
+        );
+        error
+    })?;
     println!(
         "[Cabinet Edge] Loaded {} bytes for {} ({}) in session {}.",
         rom.len(),

@@ -252,7 +252,10 @@ export async function buildServer(
       try {
         game = await games.getLaunchDetails(body.gameId);
       } catch (error) {
-        request.log.error({ err: error }, '[Cabinet DB] Failed to look up game for session.');
+        request.log.error(
+          { err: error, gameId: body.gameId },
+          '[Cabinet DB] Failed to look up game for session.',
+        );
         return reply.code(503).send({ error: 'Game catalog is unavailable' });
       }
       if (!game) return reply.code(404).send({ error: 'Game not found' });
