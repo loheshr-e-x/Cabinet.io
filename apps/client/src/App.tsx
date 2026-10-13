@@ -95,6 +95,8 @@ export function App() {
   const [touchControlsOverride, setTouchControlsOverride] = useState<boolean | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [fullscreenError, setFullscreenError] = useState('');
+  const [isMuted, setIsMuted] = useState(true);
+  const [audioError, setAudioError] = useState('');
   const [orchestratorStatus, setOrchestratorStatus] = useState<
     'checking' | 'online' | 'offline'
   >('checking');
@@ -111,9 +113,12 @@ export function App() {
   const bindVideoElement = useCallback(
     (video: HTMLVideoElement | null) => {
       videoRef.current = video;
-      if (video) video.srcObject = remoteStream;
+      if (video) {
+        video.srcObject = remoteStream;
+        video.muted = isMuted;
+      }
     },
-    [remoteStream],
+    [isMuted, remoteStream],
   );
 
   useEffect(() => {
@@ -297,6 +302,8 @@ export function App() {
         throw new Error('The orchestrator returned an invalid session response.');
       }
       setSelectedGame(game);
+      setIsMuted(true);
+      setAudioError('');
       setActiveSession({
         sessionId: result.sessionId,
         edgeWsUrl: result.edgeWsUrl,
@@ -317,6 +324,26 @@ export function App() {
   const exitStream = () => {
     setActiveSession(null);
     setErrorMessage('');
+    setAudioError('');
+  };
+
+  const toggleAudio = async () => {
+    const video = videoRef.current;
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+    setAudioError('');
+    if (!video) return;
+
+    video.muted = nextMuted;
+    if (!nextMuted && video.paused) {
+      try {
+        await video.play();
+      } catch (error) {
+        setAudioError(
+          error instanceof Error ? error.message : 'Could not start audio playback.',
+        );
+      }
+    }
   };
 
   const showInviteNotice = () => {
@@ -425,6 +452,15 @@ export function App() {
                 >
                   {isFullscreen ? 'EXIT FULLSCREEN' : 'FULLSCREEN'}
                 </button>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  aria-label={isMuted ? 'Turn audio on' : 'Turn audio off'}
+                  aria-pressed={!isMuted}
+                  onClick={() => void toggleAudio()}
+                >
+                  AUDIO: {isMuted ? 'OFF' : 'ON'}
+                </button>
               </div>
               <div className="stream-session-meta">
                 <span className="eyebrow">NOW PLAYING</span>
@@ -436,6 +472,7 @@ export function App() {
               {fullscreenError && (
                 <p className="stream-error" role="alert">{fullscreenError}</p>
               )}
+              {audioError && <p className="stream-error" role="alert">{audioError}</p>}
             </div>
             <div className="stream-player-stage">
               <div className="stream-viewport">
@@ -443,7 +480,7 @@ export function App() {
                   ref={bindVideoElement}
                   autoPlay
                   playsInline
-                  muted
+                  muted={isMuted}
                   style={{
                     width: '100%',
                     height: '100%',
