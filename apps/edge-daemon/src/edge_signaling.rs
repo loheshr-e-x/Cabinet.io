@@ -1,4 +1,5 @@
 use crate::rom_store::download_rom;
+use crate::save_state::SaveStateManager;
 use crate::signaling::{SignalingHandler, SignalingMessage};
 use crate::webrtc_stream::WebRTCBroadcaster;
 use futures_util::{SinkExt, StreamExt};
@@ -22,6 +23,7 @@ struct EdgeSessionClaims {
     token_type: String,
     session_id: String,
     user_id: String,
+    game_id: String,
     rom_key: String,
     system_core: String,
     exp: usize,
@@ -84,6 +86,7 @@ async fn handle_connection(stream: TcpStream) -> Result<(), Box<dyn Error + Send
     if claims.token_type != "edge-session"
         || claims.session_id.is_empty()
         || claims.user_id.is_empty()
+        || claims.game_id.is_empty()
         || claims.rom_key.is_empty()
         || claims.system_core.is_empty()
         || claims.exp == 0
@@ -111,19 +114,63 @@ async fn handle_connection(stream: TcpStream) -> Result<(), Box<dyn Error + Send
         1080,
     )?;
 
+    let save_state_manager = SaveStateManager::from_env()?.map(Arc::new);
+    if let Some(manager) = &save_state_manager {
+        match manager
+            .load_state(&claims.user_id, &claims.game_id, 0)
+            .await
+        {
+            Ok(Some(state)) => match emulator.load_state(&state) {
+                Ok(()) => println!(
+                    "[Cabinet Save] Restored saved state for user {} and game {}.",
+                    claims.user_id, claims.game_id
+                ),
+                Err(error) => eprintln!("[Cabinet Save] Stored state could not be loaded: {error}"),
+            },
+            Ok(None) => println!(
+                "[Cabinet Save] No stored state found for user {} and game {}.",
+                claims.user_id, claims.game_id
+            ),
+            Err(error) => eprintln!("[Cabinet Save] Automatic restore failed: {error}"),
+        }
+    } else {
+        println!(
+            "[Cabinet Save] Persistent save states are disabled; R2 and DATABASE_URL are required."
+        );
+    }
+
     let broadcaster = WebRTCBroadcaster::new(input_state)
         .await
         .map_err(|error| format!("could not initialize WebRTC broadcaster: {error}"))?;
-    handle_signaling(socket, broadcaster, emulator).await
+    handle_signaling(
+        socket,
+        broadcaster,
+        emulator,
+        save_state_manager,
+        claims.user_id,
+        claims.game_id,
+    )
+    .await
 }
 
 async fn handle_signaling(
     mut socket: WebSocketStream<TcpStream>,
     mut broadcaster: WebRTCBroadcaster,
     mut emulator: crate::emulator::EmulatorInstance,
+    save_state_manager: Option<Arc<SaveStateManager>>,
+    user_id: String,
+    game_id: String,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let peer_connection = Arc::clone(&broadcaster.peer_connection);
-    let result = handle_signaling_loop(&mut socket, &mut broadcaster, &mut emulator).await;
+    let result = handle_signaling_loop(
+        &mut socket,
+        &mut broadcaster,
+        &mut emulator,
+        save_state_manager,
+        &user_id,
+        &game_id,
+    )
+    .await;
     emulator.unload_core();
     let close_result = peer_connection.close().await;
     result?;
@@ -135,6 +182,9 @@ async fn handle_signaling_loop(
     socket: &mut WebSocketStream<TcpStream>,
     broadcaster: &mut WebRTCBroadcaster,
     emulator: &mut crate::emulator::EmulatorInstance,
+    save_state_manager: Option<Arc<SaveStateManager>>,
+    user_id: &str,
+    game_id: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut answered = false;
     let mut frame_ticker = interval(Duration::from_micros(16_667));
@@ -142,7 +192,6 @@ async fn handle_signaling_loop(
     let frame_buffer = emulator.get_frame_buffer();
     let mut save_state_commands = broadcaster.take_save_state_commands();
     let mut peer_state_changes = broadcaster.take_peer_state_changes();
-    let mut saved_state: Option<Vec<u8>> = None;
     loop {
         tokio::select! {
             _ = frame_ticker.tick(), if answered => {
@@ -161,14 +210,19 @@ async fn handle_signaling_loop(
             command = save_state_commands.recv(), if answered && !save_state_commands.is_closed() => {
                 match command {
                     Some(crate::webrtc_stream::SaveStateCommand::Save(channel)) => {
-                        let result = emulator.save_state().map(|state| {
-                            let size = state.len();
-                            saved_state = Some(state);
-                            format!("Save state captured for this session ({size} bytes).")
-                        });
+                        let result = match (&save_state_manager, emulator.save_state()) {
+                            (Some(manager), Ok(state)) => {
+                                manager
+                                    .capture_and_sync_state(user_id, game_id, 0, &state)
+                                    .await
+                                    .map(|size| format!("Save state persisted ({size} bytes)."))
+                            }
+                            (None, _) => Err("Persistent save states are not configured.".into()),
+                            (_, Err(error)) => Err(error.into()),
+                        };
                         let (success, message) = match result {
                             Ok(message) => (true, message),
-                            Err(error) => (false, error),
+                            Err(error) => (false, error.to_string()),
                         };
                         channel.send_text(serde_json::json!({
                             "type": "save_state_result",
@@ -178,10 +232,15 @@ async fn handle_signaling_loop(
                         }).to_string()).await?;
                     }
                     Some(crate::webrtc_stream::SaveStateCommand::Load(channel)) => {
-                        let result = match saved_state.as_deref() {
-                            Some(state) => emulator.load_state(state)
-                                .map(|()| format!("Save state loaded ({} bytes).", state.len())),
-                            None => Err("No save state has been captured in this session.".to_string()),
+                        let result = match &save_state_manager {
+                            Some(manager) => match manager.load_state(user_id, game_id, 0).await {
+                                Ok(Some(state)) => emulator
+                                    .load_state(&state)
+                                    .map(|()| format!("Save state loaded ({} bytes).", state.len())),
+                                Ok(None) => Err("No persistent save state exists for this game.".to_string()),
+                                Err(error) => Err(error.to_string()),
+                            },
+                            None => Err("Persistent save states are not configured.".to_string()),
                         };
                         let (success, message) = match result {
                             Ok(message) => (true, message),

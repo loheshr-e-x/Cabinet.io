@@ -22,8 +22,16 @@ The Docker builder installs the corresponding Debian packages.
 The Docker image sets `LIBRETRO_CORE_PATH` to its bundled FCEUmm core. Override
 it only when using a compatible Libretro shared library for another system.
 The daemon also requires `JWT_SECRET` and the R2 settings `R2_ENDPOINT`,
-`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET`. `PORT` defaults to
-`8080`.
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET`. Set `DATABASE_URL`
+to the Neon PostgreSQL connection string to enable persistent save states; its
+TLS connection is verified by the system certificate store. `REDIS_URL` is
+optional and is used only as a best-effort hot cache. `PORT` defaults to `8080`.
+
+When save-state persistence is configured, slot 0 is written to R2 at
+`saves/{user_id}/{game_id}.state` and its key and byte size are upserted into
+the `save_states` table. An existing slot 0 is restored after the Libretro core
+loads the ROM. Save/load requests from the browser wait for R2 and PostgreSQL
+operations and report failures rather than treating a queued write as saved.
 
 After starting the daemon, create a browser session through the orchestrator.
 The edge daemon steps the loaded core at approximately 60 Hz and sends frames

@@ -289,12 +289,14 @@ test('allows owner to start, disconnect, and reconnect a session', async () => {
       tokenType: string;
       sessionId: string;
       userId: string;
+      gameId: string;
       romKey: string;
       systemCore: string;
     }>(edgeUrl.searchParams.get('token') ?? '');
     assert.equal(sessionClaims.tokenType, 'edge-session');
     assert.equal(sessionClaims.sessionId, body.sessionId);
     assert.equal(sessionClaims.userId, TEST_USER_ID);
+    assert.equal(sessionClaims.gameId, TEST_GAME_ID);
     assert.equal(sessionClaims.romKey, 'roms/test-game.nes');
     assert.equal(sessionClaims.systemCore, 'nes');
 

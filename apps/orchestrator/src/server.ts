@@ -272,6 +272,7 @@ export async function buildServer(
           tokenType: 'edge-session',
           sessionId,
           userId: request.user.sub,
+          gameId: game.id,
           romKey: game.romR2Key,
           systemCore: game.systemCore,
         },

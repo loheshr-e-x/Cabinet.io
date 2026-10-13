@@ -32,7 +32,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     println!("[Cabinet Edge] Direct WebRTC signaling listener on 0.0.0.0:{port}.");
 
-    let save_state_manager = SaveStateManager::from_env()?.map(Arc::new);
+    let save_state_manager = SaveStateManager::from_env()
+        .map_err(|error| -> Box<dyn std::error::Error> { error })?
+        .map(Arc::new);
     let save_identity = match (
         env::var("CABINET_USER_ID").ok(),
         env::var("CABINET_GAME_ID").ok(),
@@ -45,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auto_save_enabled = save_state_manager.is_some() && save_identity.is_some();
     if !auto_save_enabled {
         println!(
-            "[Cabinet Save] Periodic saves are disabled; configure Redis/R2 and CABINET_USER_ID/CABINET_GAME_ID."
+            "[Cabinet Save] Periodic saves are disabled; configure R2, DATABASE_URL, CABINET_USER_ID, and CABINET_GAME_ID."
         );
     }
     let save_slot = if auto_save_enabled {
