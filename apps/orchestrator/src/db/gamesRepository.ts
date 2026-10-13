@@ -4,6 +4,7 @@ export interface CatalogGame {
   id: string;
   title: string;
   system: string;
+  coverArt: string | null;
 }
 
 export interface GameLaunchDetails {
@@ -20,7 +21,7 @@ export interface GamesRepository {
 export const gamesRepository: GamesRepository = {
   async listGames() {
     const result = await db.query<CatalogGame>(
-      `SELECT id::text, title, system_core AS system
+      `SELECT id::text, title, system_core AS system, cover_art AS "coverArt"
        FROM games
        ORDER BY title ASC`,
     );

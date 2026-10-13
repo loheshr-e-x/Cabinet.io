@@ -12,6 +12,7 @@ interface GameItem {
   title: string;
   system: string;
   systemCore: string;
+  coverArt?: string;
 }
 
 interface ActiveSession {
@@ -51,9 +52,17 @@ function parseGameCatalog(value: unknown): GameItem[] {
       throw new Error('The game catalog service returned an invalid game.');
     }
 
+    const coverArt: unknown = 'coverArt' in game ? game.coverArt : undefined;
+    if (coverArt !== undefined && coverArt !== null && typeof coverArt !== 'string') {
+      throw new Error('The game catalog service returned an invalid game.');
+    }
+
     return {
       id: game.id,
       title: game.title,
+      ...(typeof coverArt === 'string' && coverArt.length > 0
+        ? { coverArt }
+        : {}),
       systemCore: game.system,
       system: game.system
         .replace(/^libretro[_-]/i, '')
@@ -759,6 +768,19 @@ export function App() {
 }
 
 function CoverArtwork({ game, featured = false }: { game: GameItem; featured?: boolean }) {
+  if (game.coverArt) {
+    return (
+      <div className={`cover-art${featured ? ' cover-art--featured' : ''}`}>
+        <img
+          className="cover-art-image"
+          src={game.coverArt}
+          alt={`${game.title} cover art`}
+          loading="lazy"
+        />
+      </div>
+    );
+  }
+
   return (
     <div className={`cover-art${featured ? ' cover-art--featured' : ''}`}>
       <span className="cover-spark cover-spark--one" />

@@ -17,7 +17,12 @@ const TEST_USER_ID = '550e8400-e29b-41d4-a716-446655440001';
 const TEST_ROM_R2_KEY = 'roms/2048 (World) (Rev 5) (Aftermarket) (Unl).nes';
 const testGamesRepository: GamesRepository = {
   async listGames() {
-    return [{ id: TEST_GAME_ID, title: '2048 - renamed display title', system: 'fceumm' }];
+    return [{
+      id: TEST_GAME_ID,
+      title: '2048 - renamed display title',
+      system: 'fceumm',
+      coverArt: null,
+    }];
   },
   async getLaunchDetails(gameId) {
     return gameId === TEST_GAME_ID
@@ -164,6 +169,7 @@ test('serves the database game catalog only to authenticated users', async () =>
       id: '550e8400-e29b-41d4-a716-446655440000',
       title: 'Arcade Adventure',
       system: 'libretro_snes',
+      coverArt: 'https://cdn.example.com/arcade-adventure.png',
     },
   ];
   const repository: GamesRepository = {
