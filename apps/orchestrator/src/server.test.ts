@@ -12,11 +12,23 @@ import type { GamesRepository } from './db/gamesRepository.js';
 import { buildServer } from './server.js';
 
 const JWT_SECRET = 'test-signaling-gateway-secret-that-is-at-least-32-characters';
+const TEST_GAME_ID = '550e8400-e29b-41d4-a716-446655440000';
+const TEST_USER_ID = '550e8400-e29b-41d4-a716-446655440001';
+const testGamesRepository: GamesRepository = {
+  async listGames() {
+    return [];
+  },
+  async getLaunchDetails(gameId) {
+    return gameId === TEST_GAME_ID
+      ? { id: TEST_GAME_ID, systemCore: 'nes', romR2Key: 'roms/test-game.nes' }
+      : null;
+  },
+};
 
 async function createSession(
   app: Awaited<ReturnType<typeof buildServer>>,
   token: string,
-  gameId = 'game-1',
+  gameId = TEST_GAME_ID,
 ) {
   const response = await app.inject({
     method: 'POST',
@@ -24,7 +36,14 @@ async function createSession(
     headers: { authorization: `Bearer ${token}` },
     payload: { gameId },
   });
-  return { response, body: response.json() as { sessionId: string; edgeNodeId: string } };
+  return {
+    response,
+    body: response.json() as {
+      sessionId: string;
+      edgeNodeId: string;
+      edgeWsUrl: string;
+    },
+  };
 }
 
 function nextMessage(socket: WebSocket) {
@@ -143,8 +162,16 @@ test('serves the database game catalog only to authenticated users', async () =>
     async listGames() {
       return catalog;
     },
+    async getLaunchDetails() {
+      return null;
+    },
   };
-  const app = await buildServer(JWT_SECRET, undefined, repository);
+  const app = await buildServer(
+    JWT_SECRET,
+    undefined,
+    repository,
+    'wss://edge.example.com/ws',
+  );
   await app.ready();
   try {
     const unauthenticated = await app.inject({
@@ -169,6 +196,9 @@ test('serves the database game catalog only to authenticated users', async () =>
 test('reports game catalog database failures without returning a fake catalog', async () => {
   const repository: GamesRepository = {
     async listGames() {
+      throw new Error('database unavailable');
+    },
+    async getLaunchDetails() {
       throw new Error('database unavailable');
     },
   };
@@ -234,13 +264,32 @@ test('protects save metadata routes and validates database identifiers before qu
 });
 
 test('allows owner to start, disconnect, and reconnect a session', async () => {
-  const app = await buildServer(JWT_SECRET);
+  const app = await buildServer(
+    JWT_SECRET,
+    undefined,
+    testGamesRepository,
+    'wss://edge.example.com/ws',
+  );
   await app.ready();
   try {
-    const token = app.jwt.sign({ sub: 'user-1' });
+    const token = app.jwt.sign({ sub: TEST_USER_ID });
     const { response, body } = await createSession(app, token);
     assert.equal(response.statusCode, 200);
     assert.match(body.sessionId, /^session_/);
+    const edgeUrl = new URL(body.edgeWsUrl);
+    assert.equal(edgeUrl.origin, 'wss://edge.example.com');
+    const sessionClaims = app.jwt.verify<{
+      tokenType: string;
+      sessionId: string;
+      userId: string;
+      romKey: string;
+      systemCore: string;
+    }>(edgeUrl.searchParams.get('token') ?? '');
+    assert.equal(sessionClaims.tokenType, 'edge-session');
+    assert.equal(sessionClaims.sessionId, body.sessionId);
+    assert.equal(sessionClaims.userId, TEST_USER_ID);
+    assert.equal(sessionClaims.romKey, 'roms/test-game.nes');
+    assert.equal(sessionClaims.systemCore, 'nes');
 
     const disconnected = await app.inject({
       method: 'POST',
@@ -258,7 +307,7 @@ test('allows owner to start, disconnect, and reconnect a session', async () => {
     });
     assert.equal(reconnected.json().status, 'RECONNECTED');
 
-    const otherUser = app.jwt.sign({ sub: 'user-2' });
+    const otherUser = app.jwt.sign({ sub: '550e8400-e29b-41d4-a716-446655440002' });
     const forbidden = await app.inject({
       method: 'POST',
       url: '/api/v1/session/disconnect',
@@ -272,10 +321,15 @@ test('allows owner to start, disconnect, and reconnect a session', async () => {
 });
 
 test('authenticates signaling peers and relays offer and ICE candidate messages', async () => {
-  const app = await buildServer(JWT_SECRET);
+  const app = await buildServer(
+    JWT_SECRET,
+    undefined,
+    testGamesRepository,
+    'wss://edge.example.com/ws',
+  );
   await app.ready();
   try {
-    const clientToken = app.jwt.sign({ sub: 'user-1' });
+    const clientToken = app.jwt.sign({ sub: TEST_USER_ID });
     const { body: session } = await createSession(app, clientToken);
     const edgeToken = app.jwt.sign({
       sub: 'edge-1',

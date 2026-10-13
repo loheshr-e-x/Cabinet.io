@@ -6,8 +6,15 @@ export interface CatalogGame {
   system: string;
 }
 
+export interface GameLaunchDetails {
+  id: string;
+  systemCore: string;
+  romR2Key: string;
+}
+
 export interface GamesRepository {
   listGames(): Promise<CatalogGame[]>;
+  getLaunchDetails(gameId: string): Promise<GameLaunchDetails | null>;
 }
 
 export const gamesRepository: GamesRepository = {
@@ -18,5 +25,15 @@ export const gamesRepository: GamesRepository = {
        ORDER BY title ASC`,
     );
     return result.rows;
+  },
+
+  async getLaunchDetails(gameId) {
+    const result = await db.query<GameLaunchDetails>(
+      `SELECT id::text, system_core AS "systemCore", rom_r2_key AS "romR2Key"
+       FROM games
+       WHERE id = $1`,
+      [gameId],
+    );
+    return result.rows[0] ?? null;
   },
 };

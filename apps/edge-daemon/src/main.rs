@@ -1,6 +1,8 @@
+mod edge_signaling;
 mod emulator;
 mod frame_buffer;
 mod input_demuxer;
+mod rom_store;
 mod save_state;
 mod signaling;
 mod webrtc_stream;
@@ -24,9 +26,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input_demuxer = InputDemuxer::new(1024);
     let mut controller_ports: [u16; 4] = [0; 4];
 
-    // 3. Initialize WebRTC Broadcaster and route data-channel input to the queue
-    let _broadcaster = webrtc_stream::WebRTCBroadcaster::new(input_demuxer.get_sender()).await?;
-    println!("[Cabinet Edge] WebRTC Media & Input Demuxer Initialized.");
+    // Railway terminates public TLS and forwards WebSocket traffic to this port.
+    let port = env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse::<u16>()?;
+    let listener = edge_signaling::bind(port).await?;
+    let input_sender = input_demuxer.get_sender();
+    tokio::spawn(async move {
+        if let Err(error) = edge_signaling::serve(listener, input_sender).await {
+            eprintln!("[Cabinet Edge] WebSocket listener stopped: {error}");
+        }
+    });
+    println!("[Cabinet Edge] Direct WebRTC signaling listener on 0.0.0.0:{port}.");
 
     let save_state_manager = SaveStateManager::from_env()?.map(Arc::new);
     let save_identity = match (

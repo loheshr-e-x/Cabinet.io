@@ -47,6 +47,11 @@ export async function buildServer(
   jwtSecret: string,
   users: AuthRepository = authRepository,
   games: GamesRepository = gamesRepository,
+  edgeWsBaseUrl: string | undefined =
+    process.env.EDGE_WS_URL ??
+    (process.env.RAILWAY_EDGE_DOMAIN
+      ? `wss://${process.env.RAILWAY_EDGE_DOMAIN}/ws`
+      : undefined),
 ) {
   if (jwtSecret.length < 32) {
     throw new Error('JWT_SECRET must be at least 32 characters');
@@ -220,26 +225,62 @@ export async function buildServer(
     { preHandler: authenticate },
     async (request, reply) => {
       const body = request.body as { gameId?: unknown } | undefined;
-      if (typeof body?.gameId !== 'string' || body.gameId.trim().length === 0) {
-        return reply.code(400).send({ error: 'gameId is required' });
+      if (typeof request.user.sub !== 'string' || !UUID_PATTERN.test(request.user.sub)) {
+        return reply.code(401).send({ error: 'Authenticated user must have a UUID subject' });
       }
+      if (typeof body?.gameId !== 'string' || !UUID_PATTERN.test(body.gameId)) {
+        return reply.code(400).send({ error: 'gameId must be a UUID' });
+      }
+      if (!edgeWsBaseUrl) {
+        request.log.error('[Cabinet Session] EDGE_WS_URL or RAILWAY_EDGE_DOMAIN is not configured.');
+        return reply.code(503).send({ error: 'Edge streaming service is not configured' });
+      }
+      let edgeUrl: URL;
+      try {
+        edgeUrl = new URL(edgeWsBaseUrl);
+        if (edgeUrl.protocol !== 'wss:' && edgeUrl.protocol !== 'ws:') {
+          throw new Error('EDGE_WS_URL must use ws:// or wss://');
+        }
+      } catch (error) {
+        request.log.error({ err: error }, '[Cabinet Session] Invalid edge WebSocket URL.');
+        return reply.code(503).send({ error: 'Edge streaming service is not configured' });
+      }
+
+      let game;
+      try {
+        game = await games.getLaunchDetails(body.gameId);
+      } catch (error) {
+        request.log.error({ err: error }, '[Cabinet DB] Failed to look up game for session.');
+        return reply.code(503).send({ error: 'Game catalog is unavailable' });
+      }
+      if (!game) return reply.code(404).send({ error: 'Game not found' });
 
       const sessionId = `session_${randomUUID()}`;
       const session: SessionState = {
         userId: request.user.sub,
-        gameId: body.gameId,
+        gameId: game.id,
         edgeNodeId: 'edge-node-region-a',
         teardownTimer: null,
         peers: {},
         pendingSignals: {},
       };
       activeSessions.set(sessionId, session);
-      const protocol = request.protocol === 'https' ? 'wss' : 'ws';
+      const sessionToken = fastify.jwt.sign(
+        {
+          tokenType: 'edge-session',
+          sessionId,
+          userId: request.user.sub,
+          romKey: game.romR2Key,
+          systemCore: game.systemCore,
+        },
+        { expiresIn: '5m' },
+      );
+      edgeUrl.searchParams.set('token', sessionToken);
 
       return reply.send({
         sessionId,
         edgeNodeId: session.edgeNodeId,
-        signalingUrl: `${protocol}://${request.hostname}/ws/signaling?sessionId=${encodeURIComponent(sessionId)}`,
+        edgeWsUrl: edgeUrl.toString(),
       });
     },
   );

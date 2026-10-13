@@ -13,7 +13,7 @@ interface GameItem {
 
 interface ActiveSession {
   sessionId: string;
-  signalingUrl: string;
+  edgeWsUrl: string;
   token: string;
   game: GameItem;
 }
@@ -88,7 +88,7 @@ export function App() {
   const { connectionStatus, dataChannel, remoteStream } = useWebRTCSession({
     sessionId: activeSession?.sessionId ?? null,
     token: activeSession?.token ?? null,
-    signalingUrl: activeSession?.signalingUrl ?? null,
+    edgeWsUrl: activeSession?.edgeWsUrl ?? null,
   });
   useInputHandler(dataChannel);
 
@@ -229,15 +229,15 @@ export function App() {
         result === null ||
         !('sessionId' in result) ||
         typeof result.sessionId !== 'string' ||
-        !('signalingUrl' in result) ||
-        typeof result.signalingUrl !== 'string'
+        !('edgeWsUrl' in result) ||
+        typeof result.edgeWsUrl !== 'string'
       ) {
         throw new Error('The orchestrator returned an invalid session response.');
       }
       setSelectedGame(game);
       setActiveSession({
         sessionId: result.sessionId,
-        signalingUrl: result.signalingUrl,
+        edgeWsUrl: result.edgeWsUrl,
         token,
         game,
       });

@@ -1,25 +1,26 @@
 import { useEffect, useRef, useState } from 'react';
+import { ORCHESTRATOR_URL } from '../config';
 
 interface UseWebRTCSessionOptions {
   sessionId: string | null;
   token: string | null;
-  signalingUrl: string | null;
+  edgeWsUrl: string | null;
 }
 
 export function useWebRTCSession({
   sessionId,
   token,
-  signalingUrl,
+  edgeWsUrl,
 }: UseWebRTCSessionOptions) {
   const [connectionStatus, setConnectionStatus] = useState('idle');
   const [dataChannel, setDataChannel] = useState<RTCDataChannel | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const hasActiveSession = Boolean(sessionId && token && signalingUrl);
+  const hasActiveSession = Boolean(sessionId && token && edgeWsUrl);
 
   useEffect(() => {
-    if (!sessionId || !token || !signalingUrl) {
+    if (!sessionId || !token || !edgeWsUrl) {
       return;
     }
 
@@ -31,13 +32,10 @@ export function useWebRTCSession({
     let signalingReady = false;
     const pendingCandidates: RTCIceCandidate[] = [];
 
-    const apiBase = new URL(signalingUrl);
-    apiBase.protocol = apiBase.protocol === 'wss:' ? 'https:' : 'http:';
-
     const reportSessionState = async (action: 'disconnect' | 'reconnect') => {
       try {
         const response = await fetch(
-          new URL(`/api/v1/session/${action}`, apiBase),
+          new URL(`/api/v1/session/${action}`, ORCHESTRATOR_URL),
           {
             method: 'POST',
             headers: {
@@ -63,6 +61,7 @@ export function useWebRTCSession({
       });
       peerConnectionRef.current = peerConnection;
       peerConnection.addTransceiver('video', { direction: 'recvonly' });
+      peerConnection.addTransceiver('audio', { direction: 'recvonly' });
       const channel = peerConnection.createDataChannel('controller-input');
       setDataChannel(channel);
 
@@ -70,11 +69,7 @@ export function useWebRTCSession({
         setRemoteStream(event.streams[0] ?? new MediaStream([event.track]));
       };
 
-      const signaling = new URL(signalingUrl);
-      if (!signaling.searchParams.has('sessionId')) {
-        signaling.searchParams.set('sessionId', sessionId);
-      }
-      socket = new WebSocket(signaling);
+      socket = new WebSocket(edgeWsUrl);
       wsRef.current = socket;
 
       peerConnection.onicecandidate = (event) => {
@@ -123,22 +118,27 @@ export function useWebRTCSession({
       };
 
       socket.onopen = async () => {
-        socket.send(JSON.stringify({ type: 'auth', role: 'client', token }));
-        const offer = await peerConnection.createOffer({ iceRestart });
-        await peerConnection.setLocalDescription(offer);
-        const sdp = peerConnection.localDescription?.sdp;
-        if (!sdp) throw new Error('Peer connection did not produce an SDP offer');
-        socket.send(JSON.stringify({ type: 'offer', sdp }));
-        signalingReady = true;
-        for (const candidate of pendingCandidates.splice(0)) {
-          socket.send(
-            JSON.stringify({
-              type: 'candidate',
-              candidate: candidate.candidate,
-              sdpMid: candidate.sdpMid,
-              sdpMLineIndex: candidate.sdpMLineIndex,
-            }),
-          );
+        try {
+          const offer = await peerConnection.createOffer({ iceRestart });
+          await peerConnection.setLocalDescription(offer);
+          const sdp = peerConnection.localDescription?.sdp;
+          if (!sdp) throw new Error('Peer connection did not produce an SDP offer');
+          socket.send(JSON.stringify({ type: 'offer', sdp }));
+          signalingReady = true;
+          for (const candidate of pendingCandidates.splice(0)) {
+            socket.send(
+              JSON.stringify({
+                type: 'candidate',
+                candidate: candidate.candidate,
+                sdpMid: candidate.sdpMid,
+                sdpMLineIndex: candidate.sdpMLineIndex,
+              }),
+            );
+          }
+        } catch (error) {
+          console.error('[Cabinet] Could not create WebRTC offer:', error);
+          setConnectionStatus('offer-error');
+          socket.close();
         }
       };
 
@@ -158,15 +158,23 @@ export function useWebRTCSession({
         }
 
         if (message.type === 'answer' && message.sdp) {
-          await peerConnection.setRemoteDescription({ type: 'answer', sdp: message.sdp });
+          try {
+            await peerConnection.setRemoteDescription({ type: 'answer', sdp: message.sdp });
+          } catch (error) {
+            console.error('[Cabinet] Could not apply WebRTC answer:', error);
+            setConnectionStatus('answer-error');
+          }
         } else if (message.type === 'candidate' && message.candidate !== undefined) {
-          await peerConnection.addIceCandidate({
-            candidate: message.candidate,
-            sdpMid: message.sdpMid,
-            sdpMLineIndex: message.sdpMLineIndex,
-          });
-        } else if (message.type === 'authenticated') {
-          setConnectionStatus('signaling');
+          try {
+            await peerConnection.addIceCandidate({
+              candidate: message.candidate,
+              sdpMid: message.sdpMid,
+              sdpMLineIndex: message.sdpMLineIndex,
+            });
+          } catch (error) {
+            console.error('[Cabinet] Could not add remote ICE candidate:', error);
+            setConnectionStatus('ice-error');
+          }
         }
       };
 
@@ -188,7 +196,7 @@ export function useWebRTCSession({
       peerConnectionRef.current = null;
       wsRef.current = null;
     };
-  }, [sessionId, token, signalingUrl]);
+  }, [sessionId, token, edgeWsUrl]);
 
   return {
     connectionStatus: hasActiveSession ? connectionStatus : 'idle',
