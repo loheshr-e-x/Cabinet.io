@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AuthModal } from './components/AuthModal';
+import { ControlsInfo } from './components/ControlsInfo';
+import { TouchController } from './components/TouchController';
 import { ORCHESTRATOR_URL } from './config';
 import { useInputHandler } from './hooks/useInputHandler';
 import { useWebRTCSession } from './hooks/useWebRTCSession';
@@ -9,6 +11,7 @@ interface GameItem {
   id: string;
   title: string;
   system: string;
+  systemCore: string;
 }
 
 interface ActiveSession {
@@ -45,6 +48,7 @@ function parseGameCatalog(value: unknown): GameItem[] {
     return {
       id: game.id,
       title: game.title,
+      systemCore: game.system,
       system: game.system
         .replace(/^libretro[_-]/i, '')
         .replace(/[_-]+/g, ' ')
@@ -90,7 +94,7 @@ export function App() {
     token: activeSession?.token ?? null,
     edgeWsUrl: activeSession?.edgeWsUrl ?? null,
   });
-  useInputHandler(dataChannel);
+  const setButton = useInputHandler(dataChannel);
   const bindVideoElement = useCallback(
     (video: HTMLVideoElement | null) => {
       videoRef.current = video;
@@ -380,6 +384,7 @@ export function App() {
                   <span>Waiting for the game stream…</span>
                 </div>
               )}
+              <TouchController setButton={setButton} />
               <div className="stream-hud" aria-label="Stream diagnostics">
                 <span>INPUT: <strong>{dataChannel?.readyState === 'open' ? 'READY' : 'WAITING'}</strong></span>
                 <span>ICE: <strong>{connectionStatus.toUpperCase()}</strong></span>
@@ -427,6 +432,7 @@ export function App() {
                       >
                         + COUCH INVITE
                       </button>
+                      <ControlsInfo systemCore={selectedGame.systemCore} />
                     </div>
                   </div>
                 </article>

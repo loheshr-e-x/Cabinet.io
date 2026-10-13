@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { BUTTONS, encodeInput } from '../../../../packages/protocol/src/input';
 
 const KEY_MAPPINGS: Record<string, number> = {
@@ -8,14 +8,30 @@ const KEY_MAPPINGS: Record<string, number> = {
   ArrowRight: BUTTONS.RIGHT,
   z: BUTTONS.A,
   x: BUTTONS.B,
+  a: BUTTONS.Y,
+  s: BUTTONS.X,
+  q: BUTTONS.L,
+  w: BUTTONS.R,
   Shift: BUTTONS.SELECT,
   Enter: BUTTONS.START,
 };
 
-export function useInputHandler(
-  dataChannel: RTCDataChannel | null,
-) {
+export function useInputHandler(dataChannel: RTCDataChannel | null) {
   const pressedButtons = useRef(0);
+
+  const setButton = useCallback(
+    (button: number, isPressed: boolean) => {
+      const nextMask = isPressed
+        ? pressedButtons.current | button
+        : pressedButtons.current & ~button;
+      if (pressedButtons.current === nextMask) return;
+      pressedButtons.current = nextMask;
+      if (dataChannel?.readyState === 'open') {
+        dataChannel.send(encodeInput(nextMask));
+      }
+    },
+    [dataChannel],
+  );
 
   useEffect(() => {
     if (!dataChannel) return;
@@ -32,10 +48,7 @@ export function useInputHandler(
       if (bitmask === undefined || (isPressed && event.repeat)) return;
 
       event.preventDefault();
-      pressedButtons.current = isPressed
-        ? pressedButtons.current | bitmask
-        : pressedButtons.current & ~bitmask;
-      sendInputState();
+      setButton(bitmask, isPressed);
     };
 
     const onKeyDown = (event: KeyboardEvent) => handleKeyEvent(event, true);
@@ -59,5 +72,7 @@ export function useInputHandler(
       dataChannel.removeEventListener('open', onChannelOpen);
       releaseAllKeys();
     };
-  }, [dataChannel]);
+  }, [dataChannel, setButton]);
+
+  return setButton;
 }
