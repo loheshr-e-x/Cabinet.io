@@ -683,6 +683,7 @@ export function App() {
                 enabled={touchControlsEnabled}
                 systemCore={activeSession.game.systemCore}
                 gameTitle={activeSession.game.title}
+                keybindings={keybindings}
               />
             </div>
           </section>

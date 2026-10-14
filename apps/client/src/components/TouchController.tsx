@@ -1,28 +1,81 @@
 import { useEffect, useRef, type PointerEvent } from 'react';
 import { BUTTONS } from '../../../../packages/protocol/src/input';
-import { getTouchActionLabel } from '../gameControls';
+import {
+  getControlMappings,
+  type ControlAction,
+  type Keybindings,
+} from '../gameControls';
 
 interface TouchControllerProps {
   setButton: (button: number, isPressed: boolean) => void;
   enabled: boolean;
   systemCore: string;
   gameTitle: string;
+  keybindings: Keybindings;
 }
 
-const directions = [
-  { label: 'UP', button: BUTTONS.UP, className: 'touch-up' },
-  { label: 'LEFT', button: BUTTONS.LEFT, className: 'touch-left' },
-  { label: 'RIGHT', button: BUTTONS.RIGHT, className: 'touch-right' },
-  { label: 'DOWN', button: BUTTONS.DOWN, className: 'touch-down' },
-];
+const BUTTON_BITS: Record<string, number> = {
+  Up: BUTTONS.UP,
+  Down: BUTTONS.DOWN,
+  Left: BUTTONS.LEFT,
+  Right: BUTTONS.RIGHT,
+  A: BUTTONS.A,
+  B: BUTTONS.B,
+  X: BUTTONS.X,
+  Y: BUTTONS.Y,
+  L: BUTTONS.L,
+  R: BUTTONS.R,
+  Start: BUTTONS.START,
+  Select: BUTTONS.SELECT,
+};
+
+const DIRECTION_CLASSES: Record<string, string> = {
+  up: 'touch-up',
+  left: 'touch-left',
+  right: 'touch-right',
+  down: 'touch-down',
+};
+
+const DIRECTION_ACTIONS = new Set<ControlAction>([
+  'up',
+  'down',
+  'left',
+  'right',
+]);
+
+function getButtonFunction(
+  button: string,
+  bindingAction: ControlAction,
+  customAction?: string,
+): string {
+  if (customAction) return customAction;
+  if (bindingAction === 'jump') return 'Jump';
+  if (bindingAction === 'primary') return 'Primary';
+  if (bindingAction.startsWith('action')) {
+    return `Action ${bindingAction.slice('action'.length)}`;
+  }
+  return `${button} Button`;
+}
 
 export function TouchController({
   setButton,
   enabled,
   systemCore,
   gameTitle,
+  keybindings,
 }: TouchControllerProps) {
   const activeButtons = useRef(new Set<number>());
+  const mappings = getControlMappings(systemCore, gameTitle, keybindings);
+  const directions = mappings.filter(({ bindingAction }) =>
+    DIRECTION_ACTIONS.has(bindingAction),
+  );
+  const actionButtons = mappings.filter(
+    ({ button }) =>
+      !['Up', 'Down', 'Left', 'Right', 'Start', 'Select'].includes(button),
+  );
+  const utilityButtons = mappings.filter(({ button }) =>
+    ['Select', 'Start'].includes(button),
+  );
 
   useEffect(
     () => () => {
@@ -53,28 +106,6 @@ export function TouchController({
     event.preventDefault();
     press(button, false);
   };
-  const core = systemCore.toLocaleLowerCase().replace(/^libretro[_-]/, '');
-  const actionButtons = core.includes('mgba')
-    ? [
-        { label: 'B', button: BUTTONS.B },
-        { label: 'A', button: BUTTONS.A },
-        { label: 'L', button: BUTTONS.L },
-        { label: 'R', button: BUTTONS.R },
-      ]
-    : core.includes('snes')
-      ? [
-          { label: 'B', button: BUTTONS.B },
-          { label: 'A', button: BUTTONS.A },
-          { label: 'Y', button: BUTTONS.Y },
-          { label: 'X', button: BUTTONS.X },
-          { label: 'L', button: BUTTONS.L },
-          { label: 'R', button: BUTTONS.R },
-        ]
-      : [
-          { label: 'B', button: BUTTONS.B },
-          { label: 'A', button: BUTTONS.A },
-        ];
-
   return (
     <div
       className="touch-controller"
@@ -82,60 +113,66 @@ export function TouchController({
       onContextMenu={(event) => event.preventDefault()}
     >
       <div className="touch-dpad" aria-label="Directional pad">
-        {directions.map(({ label, button, className }) => (
-          <button
-            className={`touch-button ${className}`}
-            key={label}
-            type="button"
-            aria-label={label}
-            onPointerDown={(event) => pointerDown(event, button)}
-            onPointerUp={(event) => pointerEnd(event, button)}
-            onPointerCancel={(event) => pointerEnd(event, button)}
-            onLostPointerCapture={(event) => pointerEnd(event, button)}
-          >
-            {label === 'UP' ? '▲' : label === 'DOWN' ? '▼' : label === 'LEFT' ? '◀' : '▶'}
-          </button>
-        ))}
+        {directions.map(({ button, bindingAction, key }) => {
+          const bit = BUTTON_BITS[button];
+          if (bit === undefined) return null;
+          return (
+            <button
+              className={`touch-button ${DIRECTION_CLASSES[bindingAction]}`}
+              key={bindingAction}
+              type="button"
+              aria-label={`${key}, move ${bindingAction}`}
+              onPointerDown={(event) => pointerDown(event, bit)}
+              onPointerUp={(event) => pointerEnd(event, bit)}
+              onPointerCancel={(event) => pointerEnd(event, bit)}
+              onLostPointerCapture={(event) => pointerEnd(event, bit)}
+            >
+              <span>{key}</span>
+              <small>MOVE {bindingAction.toUpperCase()}</small>
+            </button>
+          );
+        })}
       </div>
       <div className="touch-actions">
-        {actionButtons.map(({ label, button }) => {
-          const actionLabel = getTouchActionLabel(label, systemCore, gameTitle);
+        {actionButtons.map(({ button, key, bindingAction, action }) => {
+          const bit = BUTTON_BITS[button];
+          if (bit === undefined) return null;
+          const functionLabel = getButtonFunction(button, bindingAction, action);
           return (
-          <button
-            className={`touch-button touch-action touch-action--${label.toLowerCase()}`}
-            key={label}
-            type="button"
-            aria-label={actionLabel}
-            title={actionLabel}
-            onPointerDown={(event) => pointerDown(event, button)}
-            onPointerUp={(event) => pointerEnd(event, button)}
-            onPointerCancel={(event) => pointerEnd(event, button)}
-            onLostPointerCapture={(event) => pointerEnd(event, button)}
-          >
-            <span>{label}</span>
-            {actionLabel !== label && <small>{actionLabel.slice(label.length + 3)}</small>}
-          </button>
+            <button
+              className={`touch-button touch-action touch-action--${button.toLowerCase()}`}
+              key={button}
+              type="button"
+              aria-label={`${key}, ${functionLabel}`}
+              title={`${key} · ${functionLabel}`}
+              onPointerDown={(event) => pointerDown(event, bit)}
+              onPointerUp={(event) => pointerEnd(event, bit)}
+              onPointerCancel={(event) => pointerEnd(event, bit)}
+              onLostPointerCapture={(event) => pointerEnd(event, bit)}
+            >
+              <span>{key}</span>
+              <small>{functionLabel}</small>
+            </button>
           );
         })}
         <div className="touch-utility-actions">
-          {[
-            { label: 'SELECT', button: BUTTONS.SELECT },
-            { label: 'START', button: BUTTONS.START },
-          ].map(({ label, button }) => {
-            const actionLabel = getTouchActionLabel(label, systemCore, gameTitle);
+          {utilityButtons.map(({ button, key }) => {
+            const bit = BUTTON_BITS[button];
+            if (bit === undefined) return null;
             return (
               <button
                 className="touch-button touch-utility"
-                key={label}
+                key={button}
                 type="button"
-                aria-label={actionLabel}
-                title={actionLabel}
-                onPointerDown={(event) => pointerDown(event, button)}
-                onPointerUp={(event) => pointerEnd(event, button)}
-                onPointerCancel={(event) => pointerEnd(event, button)}
-                onLostPointerCapture={(event) => pointerEnd(event, button)}
+                aria-label={`${key}, ${button}`}
+                title={`${key} · ${button}`}
+                onPointerDown={(event) => pointerDown(event, bit)}
+                onPointerUp={(event) => pointerEnd(event, bit)}
+                onPointerCancel={(event) => pointerEnd(event, bit)}
+                onLostPointerCapture={(event) => pointerEnd(event, bit)}
               >
-                {actionLabel}
+                <span>{key}</span>
+                <small>{button}</small>
               </button>
             );
           })}

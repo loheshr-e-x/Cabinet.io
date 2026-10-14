@@ -1305,17 +1305,32 @@
   text-overflow: ellipsis;
 }
 
+.touch-dpad .touch-button small {
+  max-width: 100%;
+  overflow: hidden;
+  font-family: 'Inter', sans-serif;
+  font-size: clamp(5px, 1vw, 7px);
+  line-height: 1;
+  text-overflow: ellipsis;
+}
+
 .touch-utility-actions {
   display: flex;
   gap: 8px;
 }
 
 .touch-utility {
+  display: grid;
   min-width: 60px;
   min-height: 30px;
   padding: 5px 8px;
   border-radius: 20px;
   font-size: 8px;
+}
+
+.touch-utility small {
+  font-family: 'Inter', sans-serif;
+  font-size: 6px;
 }
 
 .stream-view:fullscreen {
