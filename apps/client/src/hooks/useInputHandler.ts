@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { BUTTONS, encodeInput } from '../../../../packages/protocol/src/input';
 
 const KEY_MAPPINGS: Record<string, number> = {
@@ -16,8 +16,18 @@ const KEY_MAPPINGS: Record<string, number> = {
   Enter: BUTTONS.START,
 };
 
-export function useInputHandler(dataChannel: RTCDataChannel | null) {
+export function useInputHandler(
+  dataChannel: RTCDataChannel | null,
+  systemCore = '',
+) {
   const pressedButtons = useRef(0);
+  const keyMappings = useMemo(
+    () =>
+      systemCore.toLocaleLowerCase().replace(/^libretro[_-]/, '').includes('mgba')
+        ? { ...KEY_MAPPINGS, z: BUTTONS.B, x: BUTTONS.A }
+        : KEY_MAPPINGS,
+    [systemCore],
+  );
 
   const setButton = useCallback(
     (button: number, isPressed: boolean) => {
@@ -44,7 +54,7 @@ export function useInputHandler(dataChannel: RTCDataChannel | null) {
 
     const handleKeyEvent = (event: KeyboardEvent, isPressed: boolean) => {
       const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-      const bitmask = KEY_MAPPINGS[key];
+      const bitmask = keyMappings[key];
       if (bitmask === undefined || (isPressed && event.repeat)) return;
 
       event.preventDefault();
@@ -72,7 +82,7 @@ export function useInputHandler(dataChannel: RTCDataChannel | null) {
       dataChannel.removeEventListener('open', onChannelOpen);
       releaseAllKeys();
     };
-  }, [dataChannel, setButton]);
+  }, [dataChannel, keyMappings, setButton]);
 
   return setButton;
 }

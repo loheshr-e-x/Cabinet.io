@@ -146,7 +146,7 @@ async fn handle_connection(stream: TcpStream) -> Result<(), Box<dyn Error + Send
         );
     }
 
-    let broadcaster = WebRTCBroadcaster::new(input_state)
+    let broadcaster = WebRTCBroadcaster::new(input_state, emulator.audio_sample_rate())
         .await
         .map_err(|error| format!("could not initialize WebRTC broadcaster: {error}"))?;
     handle_signaling(
@@ -214,6 +214,7 @@ async fn handle_signaling_loop(
     let mut last_frame_number = 0;
     let mut session_save_state: Option<Vec<u8>> = None;
     let frame_buffer = emulator.get_frame_buffer();
+    let mut audio_samples = Vec::with_capacity(4096);
     let mut save_state_commands = broadcaster.take_save_state_commands();
     let mut peer_state_changes = broadcaster.take_peer_state_changes();
     loop {
@@ -230,6 +231,11 @@ async fn handle_signaling_loop(
                         .send_video_frame(Arc::clone(&frame_buffer), frame_number as i64)
                         .await?;
                 }
+                frame_buffer
+                    .lock()
+                    .map_err(|_| "Libretro audio buffer lock poisoned")?
+                    .copy_audio_into(&mut audio_samples);
+                broadcaster.send_audio_samples(&audio_samples).await?;
             }
             command = save_state_commands.recv(), if answered && !save_state_commands.is_closed() => {
                 match command {

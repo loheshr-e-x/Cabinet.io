@@ -1,4 +1,6 @@
+use libloading::Library;
 use serde::Deserialize;
+use std::ffi::c_void;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use vpx_encode::{Config as VpxConfig, Encoder as VpxEncoder, VideoCodecId};
@@ -15,12 +17,158 @@ use webrtc::track::track_local::TrackLocal;
 
 use crate::frame_buffer::FrameBuffer;
 
+type OpusEncoderCreate = unsafe extern "C" fn(i32, i32, i32, *mut i32) -> *mut c_void;
+type OpusEncode = unsafe extern "C" fn(*mut c_void, *const i16, i32, *mut u8, i32) -> i32;
+type OpusEncoderDestroy = unsafe extern "C" fn(*mut c_void);
+
+const OPUS_SAMPLE_RATE: u32 = 48_000;
+const OPUS_CHANNELS: i32 = 2;
+const OPUS_APPLICATION_AUDIO: i32 = 2049;
+const OPUS_FRAME_SAMPLES: usize = 960;
+const OPUS_PACKET_CAPACITY: usize = 4_000;
+
 pub struct WebRTCBroadcaster {
     pub peer_connection: Arc<RTCPeerConnection>,
     pub video_track: Arc<TrackLocalStaticSample>,
+    audio_track: Arc<TrackLocalStaticSample>,
     video_encoder_sender: mpsc::Sender<VideoFrameRequest>,
+    audio_encoder: OpusAudioEncoder,
     save_state_commands: Option<mpsc::UnboundedReceiver<SaveStateCommand>>,
     peer_state_changes: Option<mpsc::UnboundedReceiver<RTCPeerConnectionState>>,
+}
+
+struct OpusAudioEncoder {
+    _library: Library,
+    encoder: *mut c_void,
+    encode: OpusEncode,
+    destroy: OpusEncoderDestroy,
+    source_sample_rate: u32,
+    resample_phase: u64,
+    pending_pcm: Vec<i16>,
+}
+
+// The encoder is owned and used by one broadcaster task; it is never called concurrently.
+unsafe impl Send for OpusAudioEncoder {}
+
+impl OpusAudioEncoder {
+    fn new(source_sample_rate: u32) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let library = unsafe {
+            Library::new("libopus.so.0")
+                .or_else(|_| Library::new("libopus.so"))
+                .or_else(|_| Library::new("libopus.0.dylib"))?
+        };
+        let create = unsafe { *library.get::<OpusEncoderCreate>(b"opus_encoder_create\0")? };
+        let encode = unsafe { *library.get::<OpusEncode>(b"opus_encode\0")? };
+        let destroy = unsafe { *library.get::<OpusEncoderDestroy>(b"opus_encoder_destroy\0")? };
+        let mut error = 0;
+        let encoder = unsafe {
+            create(
+                OPUS_SAMPLE_RATE as i32,
+                OPUS_CHANNELS,
+                OPUS_APPLICATION_AUDIO,
+                &mut error,
+            )
+        };
+        if encoder.is_null() || error != 0 {
+            return Err(format!("could not create Opus encoder (error {error})").into());
+        }
+
+        Ok(Self {
+            _library: library,
+            encoder,
+            encode,
+            destroy,
+            source_sample_rate: source_sample_rate.max(1),
+            resample_phase: 0,
+            pending_pcm: Vec::with_capacity(OPUS_FRAME_SAMPLES * OPUS_CHANNELS as usize * 2),
+        })
+    }
+
+    fn encode_samples(
+        &mut self,
+        samples: &[i16],
+    ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut packets = Vec::new();
+        resample_stereo_into(
+            samples,
+            self.source_sample_rate,
+            &mut self.resample_phase,
+            &mut self.pending_pcm,
+        )?;
+
+        while self.pending_pcm.len() >= OPUS_FRAME_SAMPLES * OPUS_CHANNELS as usize {
+            let mut packet = vec![0; OPUS_PACKET_CAPACITY];
+            let encoded_size = unsafe {
+                (self.encode)(
+                    self.encoder,
+                    self.pending_pcm.as_ptr(),
+                    OPUS_FRAME_SAMPLES as i32,
+                    packet.as_mut_ptr(),
+                    packet.len() as i32,
+                )
+            };
+            if encoded_size < 0 {
+                return Err(format!("Opus encoding failed ({encoded_size})").into());
+            }
+            packet.truncate(encoded_size as usize);
+            packets.push(packet);
+
+            let remaining = self.pending_pcm.len() - OPUS_FRAME_SAMPLES * OPUS_CHANNELS as usize;
+            self.pending_pcm
+                .copy_within(OPUS_FRAME_SAMPLES * OPUS_CHANNELS as usize.., 0);
+            self.pending_pcm.truncate(remaining);
+        }
+        Ok(packets)
+    }
+}
+
+impl Drop for OpusAudioEncoder {
+    fn drop(&mut self) {
+        if !self.encoder.is_null() {
+            unsafe { (self.destroy)(self.encoder) };
+            self.encoder = std::ptr::null_mut();
+        }
+    }
+}
+
+fn resample_stereo_into(
+    samples: &[i16],
+    source_sample_rate: u32,
+    phase: &mut u64,
+    output: &mut Vec<i16>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if samples.len() % 2 != 0 {
+        return Err("Libretro stereo audio buffer contains an incomplete sample pair".into());
+    }
+    let source_sample_rate = u64::from(source_sample_rate.max(1));
+    for stereo_frame in samples.chunks_exact(2) {
+        *phase = phase
+            .checked_add(u64::from(OPUS_SAMPLE_RATE))
+            .ok_or("audio resampling phase overflow")?;
+        while *phase >= source_sample_rate {
+            output.extend_from_slice(stereo_frame);
+            *phase -= source_sample_rate;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::resample_stereo_into;
+
+    #[test]
+    fn resamples_32khz_stereo_audio_to_48khz_frames() {
+        let input = [100, -100, 200, -200, 300, -300, 400, -400];
+        let mut output = Vec::new();
+        let mut phase = 0;
+
+        resample_stereo_into(&input, 32_000, &mut phase, &mut output).unwrap();
+
+        assert_eq!(output.len(), 12);
+        assert_eq!(&output[..4], &[100, -100, 200, -200]);
+        assert_eq!(phase, 0);
+    }
 }
 
 pub enum SaveStateCommand {
@@ -44,7 +192,8 @@ struct VideoFrameRequest {
 impl WebRTCBroadcaster {
     pub async fn new(
         input_state: Arc<std::sync::Mutex<u16>>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+        source_sample_rate: u32,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let (save_state_sender, save_state_commands) = mpsc::unbounded_channel();
         let (peer_state_sender, peer_state_changes) = mpsc::unbounded_channel();
         let mut media_engine = MediaEngine::default();
@@ -156,6 +305,20 @@ impl WebRTCBroadcaster {
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
 
+        let audio_track = Arc::new(TrackLocalStaticSample::new(
+            webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability {
+                mime_type: "audio/opus".to_string(),
+                clock_rate: OPUS_SAMPLE_RATE,
+                channels: OPUS_CHANNELS as u16,
+                ..Default::default()
+            },
+            "audio".to_string(),
+            "cabinet-audio".to_string(),
+        ));
+        peer_connection
+            .add_track(Arc::clone(&audio_track) as Arc<dyn TrackLocal + Send + Sync>)
+            .await?;
+
         let (video_encoder_sender, video_encoder_receiver) = mpsc::channel(1);
         std::thread::Builder::new()
             .name("cabinet-vp8-encoder".to_string())
@@ -164,7 +327,9 @@ impl WebRTCBroadcaster {
         Ok(Self {
             peer_connection,
             video_track,
+            audio_track,
             video_encoder_sender,
+            audio_encoder: OpusAudioEncoder::new(source_sample_rate)?,
             save_state_commands: Some(save_state_commands),
             peer_state_changes: Some(peer_state_changes),
         })
@@ -204,6 +369,22 @@ impl WebRTCBroadcaster {
                 .write_sample(&Sample {
                     data: packet.into(),
                     duration: std::time::Duration::from_micros(16_667),
+                    ..Default::default()
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn send_audio_samples(
+        &mut self,
+        samples: &[i16],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for packet in self.audio_encoder.encode_samples(samples)? {
+            self.audio_track
+                .write_sample(&Sample {
+                    data: packet.into(),
+                    duration: std::time::Duration::from_millis(20),
                     ..Default::default()
                 })
                 .await?;

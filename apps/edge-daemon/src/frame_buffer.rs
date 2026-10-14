@@ -23,6 +23,7 @@ pub struct FrameBuffer {
     pub height: u32,
     pub pitch: usize,
     pub frame_number: u64,
+    audio_len: usize,
     max_width: u32,
     max_height: u32,
 }
@@ -40,6 +41,7 @@ impl FrameBuffer {
             height: max_height,
             pitch: (max_width * 4) as usize,
             frame_number: 0,
+            audio_len: 0,
             max_width,
             max_height,
         }
@@ -118,10 +120,21 @@ impl FrameBuffer {
         Ok(())
     }
 
-    /// Copy incoming audio samples into pre-allocated memory
-    pub fn update_audio(&mut self, samples: &[i16]) {
-        let len = samples.len().min(self.audio_buffer.len());
-        self.audio_buffer[..len].copy_from_slice(&samples[..len]);
+    pub fn append_audio(&mut self, samples: &[i16]) -> usize {
+        let len = samples
+            .len()
+            .min(self.audio_buffer.len().saturating_sub(self.audio_len));
+        let stereo_len = len - len % 2;
+        self.audio_buffer[self.audio_len..self.audio_len + stereo_len]
+            .copy_from_slice(&samples[..stereo_len]);
+        self.audio_len += stereo_len;
+        stereo_len / 2
+    }
+
+    pub fn copy_audio_into(&mut self, destination: &mut Vec<i16>) {
+        destination.clear();
+        destination.extend_from_slice(&self.audio_buffer[..self.audio_len]);
+        self.audio_len = 0;
     }
 }
 
@@ -162,5 +175,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(&buffer.video_buffer[..8], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn accumulates_and_drains_bounded_stereo_audio_samples() {
+        let mut buffer = FrameBuffer::new(1, 1, 2);
+        assert_eq!(buffer.append_audio(&[10, -10, 20, -20, 30, -30]), 2);
+        let mut output = Vec::with_capacity(4);
+
+        buffer.copy_audio_into(&mut output);
+        assert_eq!(output, [10, -10, 20, -20]);
+        buffer.copy_audio_into(&mut output);
+        assert!(output.is_empty());
     }
 }

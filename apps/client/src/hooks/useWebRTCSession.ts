@@ -133,13 +133,15 @@ export function useWebRTCSession({
         if (stopped) return;
         console.info('[Cabinet UI] Incoming track received:', event.track.kind);
         setRemoteStream((stream) => {
-          const incomingStream = event.streams[0];
-          if (incomingStream) return incomingStream;
-          if (stream) {
-            stream.addTrack(event.track);
-            return stream;
+          const tracks = new Map<string, MediaStreamTrack>();
+          for (const track of [
+            ...(stream?.getTracks() ?? []),
+            ...(event.streams[0]?.getTracks() ?? []),
+            event.track,
+          ]) {
+            tracks.set(track.id, track);
           }
-          return new MediaStream([event.track]);
+          return new MediaStream([...tracks.values()]);
         });
       };
 

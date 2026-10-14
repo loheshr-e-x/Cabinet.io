@@ -1175,6 +1175,25 @@
   position: relative;
 }
 
+.stream-audio {
+  display: none;
+}
+
+.loading-control-hints {
+  display: flex;
+  max-width: min(680px, 90%);
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 14px;
+  margin-top: 10px;
+  color: #8fa7c8;
+  font-size: 10px;
+}
+
+.loading-control-hints span strong {
+  color: #ff7ee2;
+}
+
 .touch-controller {
   display: flex;
   align-items: center;
@@ -1243,10 +1262,12 @@
 }
 
 .touch-actions {
-  display: grid;
-  grid-template-columns: auto;
+  display: flex;
+  max-width: 62%;
+  flex-wrap: wrap;
   justify-items: center;
   align-items: center;
+  justify-content: center;
   gap: 10px;
 }
 
@@ -1266,13 +1287,22 @@
 }
 
 .touch-action--a {
-  grid-column: 2;
-  grid-row: 1;
+  grid-column: auto;
+  grid-row: auto;
 }
 
 .touch-action--b {
-  grid-column: 1;
-  grid-row: 1;
+  grid-column: auto;
+  grid-row: auto;
+}
+
+.touch-action small {
+  max-width: 72px;
+  overflow: hidden;
+  font-family: 'Inter', sans-serif;
+  font-size: 7px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
 }
 
 .touch-utility-actions {

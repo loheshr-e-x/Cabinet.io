@@ -1,40 +1,12 @@
 import { useEffect, useState } from 'react';
+import { getControlMappings } from '../gameControls';
 
 interface ControlsInfoProps {
   systemCore: string;
+  gameTitle: string;
 }
 
-const SYSTEM_BUTTONS: Record<string, Array<[string, string]>> = {
-  nes: [
-    ['D-Pad', 'Arrow Keys'],
-    ['A', 'Z'],
-    ['B', 'X'],
-    ['Start', 'Enter'],
-    ['Select', 'Shift'],
-  ],
-  snes: [
-    ['D-Pad', 'Arrow Keys'],
-    ['A', 'Z'],
-    ['B', 'X'],
-    ['Y', 'A'],
-    ['X', 'S'],
-    ['L', 'Q'],
-    ['R', 'W'],
-    ['Start', 'Enter'],
-    ['Select', 'Shift'],
-  ],
-  gba: [
-    ['D-Pad', 'Arrow Keys'],
-    ['A', 'Z'],
-    ['B', 'X'],
-    ['L', 'Q'],
-    ['R', 'W'],
-    ['Start', 'Enter'],
-    ['Select', 'Shift'],
-  ],
-};
-
-function getConsole(systemCore: string) {
+function getConsoleName(systemCore: string) {
   const core = systemCore.toLocaleLowerCase().replace(/^libretro[_-]/, '');
   if (core.includes('fceumm') || core.includes('nes')) return 'nes';
   if (core.includes('snes9x') || core.includes('snes')) return 'snes';
@@ -65,11 +37,11 @@ function useTouchDevice() {
   return isTouch;
 }
 
-export function ControlsInfo({ systemCore }: ControlsInfoProps) {
+export function ControlsInfo({ systemCore, gameTitle }: ControlsInfoProps) {
   const [isOpen, setIsOpen] = useState(false);
   const isTouch = useTouchDevice();
-  const consoleType = getConsole(systemCore);
-  const buttons = SYSTEM_BUTTONS[consoleType] ?? SYSTEM_BUTTONS.nes;
+  const consoleType = getConsoleName(systemCore);
+  const buttons = getControlMappings(systemCore, gameTitle);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -119,9 +91,9 @@ export function ControlsInfo({ systemCore }: ControlsInfoProps) {
               DEVICE: {isTouch ? 'TOUCHSCREEN' : 'KEYBOARD'}
             </p>
             <dl className="controls-list">
-              {buttons.map(([button, key]) => (
+              {buttons.map(({ button, key, action }) => (
                 <div key={button}>
-                  <dt>{button}</dt>
+                  <dt>{action ? `${button} · ${action}` : button}</dt>
                   <dd>{key}</dd>
                 </div>
               ))}

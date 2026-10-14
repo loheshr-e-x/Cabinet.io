@@ -33,6 +33,7 @@ RUN sed -i 's/^Components: main$/Components: main contrib non-free non-free-firm
     ca-certificates \
     libvpx7 \
     libssl3 \
+    libopus0 \
     libretro-snes9x \
     libretro-mgba \
     && mkdir -p /usr/lib/libretro \

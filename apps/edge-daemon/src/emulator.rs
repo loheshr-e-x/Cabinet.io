@@ -14,11 +14,13 @@ type RetroInit = unsafe extern "C" fn();
 type RetroDeinit = unsafe extern "C" fn();
 type RetroRun = unsafe extern "C" fn();
 type RetroGetSystemInfo = unsafe extern "C" fn(*mut libretro::retro_system_info);
+type RetroGetSystemAvInfo = unsafe extern "C" fn(*mut libretro::retro_system_av_info);
 type RetroLoadGame = unsafe extern "C" fn(*const libretro::retro_game_info) -> bool;
 type RetroUnloadGame = unsafe extern "C" fn();
 type RetroSetEnvironment = unsafe extern "C" fn(libretro::retro_environment_t);
 type RetroSetVideoRefresh = unsafe extern "C" fn(libretro::retro_video_refresh_t);
 type RetroSetAudioSampleBatch = unsafe extern "C" fn(libretro::retro_audio_sample_batch_t);
+type RetroSetAudioSample = unsafe extern "C" fn(libretro::retro_audio_sample_t);
 type RetroSetInputPoll = unsafe extern "C" fn(libretro::retro_input_poll_t);
 type RetroSetInputState = unsafe extern "C" fn(libretro::retro_input_state_t);
 type RetroSerializeSize = unsafe extern "C" fn() -> usize;
@@ -77,6 +79,7 @@ pub struct EmulatorInstance {
     temporary_rom_path: Option<PathBuf>,
     owns_active_core: bool,
     serializer: Option<LibretroSerializer>,
+    audio_sample_rate: u32,
 }
 
 impl EmulatorInstance {
@@ -94,6 +97,7 @@ impl EmulatorInstance {
             temporary_rom_path: None,
             owns_active_core: false,
             serializer: None,
+            audio_sample_rate: 32_000,
         }
     }
 
@@ -148,6 +152,8 @@ impl EmulatorInstance {
         let retro_run = unsafe { *library.get::<RetroRun>(b"retro_run\0")? };
         let retro_get_system_info =
             unsafe { *library.get::<RetroGetSystemInfo>(b"retro_get_system_info\0")? };
+        let retro_get_system_av_info =
+            unsafe { *library.get::<RetroGetSystemAvInfo>(b"retro_get_system_av_info\0")? };
         let retro_load_game = unsafe { *library.get::<RetroLoadGame>(b"retro_load_game\0")? };
         let retro_unload_game = unsafe { *library.get::<RetroUnloadGame>(b"retro_unload_game\0")? };
         let set_environment =
@@ -156,6 +162,8 @@ impl EmulatorInstance {
             unsafe { *library.get::<RetroSetVideoRefresh>(b"retro_set_video_refresh\0")? };
         let set_audio_sample_batch =
             unsafe { *library.get::<RetroSetAudioSampleBatch>(b"retro_set_audio_sample_batch\0")? };
+        let set_audio_sample =
+            unsafe { *library.get::<RetroSetAudioSample>(b"retro_set_audio_sample\0")? };
         let set_input_poll =
             unsafe { *library.get::<RetroSetInputPoll>(b"retro_set_input_poll\0")? };
         let set_input_state =
@@ -203,6 +211,7 @@ impl EmulatorInstance {
             set_environment(Some(environment_callback));
             set_video_refresh(Some(video_refresh_callback));
             set_audio_sample_batch(Some(audio_sample_batch_callback));
+            set_audio_sample(Some(audio_sample_callback));
             set_input_poll(Some(input_poll_callback));
             set_input_state(Some(input_state_callback));
             retro_init();
@@ -240,6 +249,15 @@ impl EmulatorInstance {
             )
             .into());
         }
+        let mut av_info: libretro::retro_system_av_info = unsafe { std::mem::zeroed() };
+        unsafe { retro_get_system_av_info(&mut av_info) };
+        let audio_sample_rate = if av_info.timing.sample_rate.is_finite()
+            && (8_000.0..=192_000.0).contains(&av_info.timing.sample_rate)
+        {
+            av_info.timing.sample_rate.round() as u32
+        } else {
+            32_000
+        };
 
         let serializer = unsafe {
             match (
@@ -268,6 +286,7 @@ impl EmulatorInstance {
             temporary_rom_path,
             owns_active_core: true,
             serializer,
+            audio_sample_rate,
         })
     }
 
@@ -322,6 +341,10 @@ impl EmulatorInstance {
 
     pub fn get_frame_buffer(&self) -> Arc<Mutex<FrameBuffer>> {
         Arc::clone(&self.frame_buffer)
+    }
+
+    pub fn audio_sample_rate(&self) -> u32 {
+        self.audio_sample_rate
     }
 
     pub fn step_frame(&mut self) {
@@ -537,7 +560,33 @@ pub unsafe extern "C" fn audio_sample_batch_callback(data: *const i16, frames: u
     if data.is_null() {
         return 0;
     }
-    frames
+    let Some(sample_count) = frames.checked_mul(2) else {
+        return 0;
+    };
+    let samples = unsafe { std::slice::from_raw_parts(data, sample_count) };
+    let Ok(target) = callback_frame_buffer().lock() else {
+        return 0;
+    };
+    let Some(frame_buffer) = target.as_ref() else {
+        return 0;
+    };
+    let Ok(mut frame_buffer) = frame_buffer.lock() else {
+        return 0;
+    };
+    frame_buffer.append_audio(samples)
+}
+
+pub unsafe extern "C" fn audio_sample_callback(left: i16, right: i16) {
+    let Ok(target) = callback_frame_buffer().lock() else {
+        return;
+    };
+    let Some(frame_buffer) = target.as_ref().cloned() else {
+        return;
+    };
+    drop(target);
+    if let Ok(mut frame_buffer) = frame_buffer.lock() {
+        frame_buffer.append_audio(&[left, right]);
+    };
 }
 
 unsafe extern "C" fn input_poll_callback() {}
@@ -639,6 +688,21 @@ mod tests {
         assert_eq!(captured.height, 1);
         assert_eq!(captured.frame_number, 1);
         assert_eq!(&captured.video_buffer[..8], &frame);
+        *callback_frame_buffer().lock().unwrap() = None;
+    }
+
+    #[test]
+    fn audio_batch_callback_copies_stereo_samples_into_shared_buffer() {
+        let frame_buffer = Arc::new(Mutex::new(FrameBuffer::new(1, 1, 4)));
+        *callback_frame_buffer().lock().unwrap() = Some(Arc::clone(&frame_buffer));
+        let samples = [100_i16, -100, 200, -200];
+
+        let consumed = unsafe { audio_sample_batch_callback(samples.as_ptr(), 2) };
+        let mut captured = Vec::new();
+        frame_buffer.lock().unwrap().copy_audio_into(&mut captured);
+
+        assert_eq!(consumed, 2);
+        assert_eq!(captured, samples);
         *callback_frame_buffer().lock().unwrap() = None;
     }
 

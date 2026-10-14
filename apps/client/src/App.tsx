@@ -5,6 +5,7 @@ import { TouchController } from './components/TouchController';
 import { ORCHESTRATOR_URL } from './config';
 import { useInputHandler } from './hooks/useInputHandler';
 import { useWebRTCSession } from './hooks/useWebRTCSession';
+import { getControlMappings } from './gameControls';
 import './App.css';
 
 interface GameItem {
@@ -117,6 +118,7 @@ export function App() {
     'checking' | 'online' | 'offline'
   >('checking');
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const streamViewRef = useRef<HTMLElement | null>(null);
   const touchControlsEnabled = touchControlsOverride ?? isTouchDevice;
 
@@ -131,7 +133,10 @@ export function App() {
     token: activeSession?.token ?? null,
     edgeWsUrl: activeSession?.edgeWsUrl ?? null,
   });
-  const setButton = useInputHandler(dataChannel);
+  const setButton = useInputHandler(
+    dataChannel,
+    activeSession?.game.systemCore ?? '',
+  );
   const sendSaveStateCommand = useCallback(
     (command: 'save_state' | 'load_state') => {
       if (!dataChannel || dataChannel.readyState !== 'open') {
@@ -197,10 +202,10 @@ export function App() {
       videoRef.current = video;
       if (video) {
         video.srcObject = remoteStream;
-        video.muted = isMuted;
+        video.muted = true;
       }
     },
-    [isMuted, remoteStream],
+    [remoteStream],
   );
 
   useEffect(() => {
@@ -330,6 +335,24 @@ export function App() {
     if (videoRef.current) videoRef.current.srcObject = remoteStream;
   }, [remoteStream]);
 
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.muted = isMuted;
+    audio.srcObject = remoteStream
+      ? new MediaStream(remoteStream.getAudioTracks())
+      : null;
+    if (remoteStream?.getAudioTracks().length) {
+      void audio.play().catch((error: unknown) => {
+        if (!isMuted) {
+          setAudioError(
+            error instanceof Error ? error.message : 'Could not start audio playback.',
+          );
+        }
+      });
+    }
+  }, [isMuted, remoteStream]);
+
   const visibleGames = games.filter((game) => {
     const query = searchQuery.trim().toLocaleLowerCase();
     const matchesSearch =
@@ -413,16 +436,16 @@ export function App() {
   };
 
   const toggleAudio = async () => {
-    const video = videoRef.current;
+    const audio = audioRef.current;
     const nextMuted = !isMuted;
     setIsMuted(nextMuted);
     setAudioError('');
-    if (!video) return;
+    if (!audio) return;
 
-    video.muted = nextMuted;
-    if (!nextMuted && video.paused) {
+    audio.muted = nextMuted;
+    if (!nextMuted) {
       try {
-        await video.play();
+        await audio.play();
       } catch (error) {
         setAudioError(
           error instanceof Error ? error.message : 'Could not start audio playback.',
@@ -518,7 +541,10 @@ export function App() {
                 <button className="button button--quiet" onClick={exitStream}>
                   ← EXIT TO CATALOG
                 </button>
-                <ControlsInfo systemCore={activeSession.game.systemCore} />
+                <ControlsInfo
+                  systemCore={activeSession.game.systemCore}
+                  gameTitle={activeSession.game.title}
+                />
                 <button
                   className="button button--secondary"
                   type="button"
@@ -588,11 +614,29 @@ export function App() {
             </div>
             <div className="stream-player-stage">
               <div className="stream-viewport">
+                <audio
+                  ref={audioRef}
+                  className="stream-audio"
+                  autoPlay
+                  muted={isMuted}
+                  aria-label="Game audio"
+                />
                 <video
                   ref={bindVideoElement}
                   autoPlay
                   playsInline
-                  muted={isMuted}
+                  muted
+                  onPointerDown={() => {
+                    if (!isMuted && audioRef.current?.paused) {
+                      void audioRef.current.play().catch((error: unknown) => {
+                        setAudioError(
+                          error instanceof Error
+                            ? error.message
+                            : 'Could not start audio playback.',
+                        );
+                      });
+                    }
+                  }}
                   style={{
                     width: '100%',
                     height: '100%',
@@ -605,6 +649,18 @@ export function App() {
                     <span className="loading-orbit" />
                     <strong>CONNECTING TO EDGE NODE</strong>
                     <span>Waiting for the game stream…</span>
+                    <div className="loading-control-hints">
+                      {getControlMappings(
+                        activeSession.game.systemCore,
+                        activeSession.game.title,
+                      )
+                        .filter(({ action }) => action)
+                        .map(({ button, key, action }) => (
+                          <span key={button}>
+                            <strong>{button}: {action}</strong> · {key}
+                          </span>
+                        ))}
+                    </div>
                   </div>
                 )}
                 <div className="stream-hud" aria-label="Stream diagnostics">
@@ -615,6 +671,8 @@ export function App() {
               <TouchController
                 setButton={setButton}
                 enabled={touchControlsEnabled}
+                systemCore={activeSession.game.systemCore}
+                gameTitle={activeSession.game.title}
               />
             </div>
           </section>
