@@ -1,4 +1,5 @@
 use crate::frame_buffer::FrameBuffer;
+use crate::frame_buffer::PixelFormat;
 use libloading::Library;
 use rust_libretro_sys as libretro;
 use std::ffi::CString;
@@ -6,7 +7,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::raw::{c_uint, c_void};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 type RetroInit = unsafe extern "C" fn();
@@ -26,6 +27,11 @@ type RetroUnserialize = unsafe extern "C" fn(*const c_void, usize) -> bool;
 
 static ACTIVE_CORE: AtomicBool = AtomicBool::new(false);
 static TEMP_ROM_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static CALLBACK_PIXEL_FORMAT: AtomicU32 =
+    AtomicU32::new(libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_XRGB8888 as u32);
+const MAX_VIDEO_WIDTH: usize = 1920;
+const MAX_VIDEO_HEIGHT: usize = 1080;
+const MAX_VIDEO_PITCH: usize = MAX_VIDEO_WIDTH * 4;
 static CALLBACK_FRAME_BUFFER: std::sync::OnceLock<Mutex<Option<Arc<Mutex<FrameBuffer>>>>> =
     std::sync::OnceLock::new();
 static CALLBACK_INPUT_STATE: std::sync::OnceLock<Mutex<Option<Arc<Mutex<u16>>>>> =
@@ -190,6 +196,10 @@ impl EmulatorInstance {
         }
 
         unsafe {
+            CALLBACK_PIXEL_FORMAT.store(
+                libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_XRGB8888 as u32,
+                Ordering::Release,
+            );
             set_environment(Some(environment_callback));
             set_video_refresh(Some(video_refresh_callback));
             set_audio_sample_batch(Some(audio_sample_batch_callback));
@@ -433,8 +443,22 @@ fn write_temporary_rom(
 unsafe extern "C" fn environment_callback(command: c_uint, data: *mut c_void) -> bool {
     if command == libretro::RETRO_ENVIRONMENT_SET_PIXEL_FORMAT && !data.is_null() {
         let requested_format = unsafe { *(data.cast::<u32>()) };
-        return requested_format
-            == libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_XRGB8888 as u32;
+        let pixel_format = if requested_format
+            == libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_XRGB8888 as u32
+        {
+            PixelFormat::Xrgb8888
+        } else if requested_format == libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_RGB565 as u32
+        {
+            PixelFormat::Rgb565
+        } else if requested_format
+            == libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_0RGB1555 as u32
+        {
+            PixelFormat::Rgb1555
+        } else {
+            return false;
+        };
+        CALLBACK_PIXEL_FORMAT.store(pixel_format_to_libretro(pixel_format), Ordering::Release);
+        return true;
     }
     false
 }
@@ -448,7 +472,30 @@ pub unsafe extern "C" fn video_refresh_callback(
     if data.is_null() {
         return;
     }
-    let Some(source_len) = pitch.checked_mul(height as usize) else {
+    let pixel_format = pixel_format_from_libretro(CALLBACK_PIXEL_FORMAT.load(Ordering::Acquire));
+    let Some(pixel_format) = pixel_format else {
+        eprintln!("[Cabinet Edge] Dropping Libretro frame with unsupported pixel format.");
+        return;
+    };
+    let input_row_bytes = (width as usize).checked_mul(pixel_format.bytes_per_pixel());
+    let Some(input_row_bytes) = input_row_bytes else {
+        eprintln!("[Cabinet Edge] Dropping Libretro frame with invalid row width.");
+        return;
+    };
+    if width == 0
+        || height == 0
+        || width as usize > MAX_VIDEO_WIDTH
+        || height as usize > MAX_VIDEO_HEIGHT
+        || pitch < input_row_bytes
+        || pitch > MAX_VIDEO_PITCH
+    {
+        eprintln!("[Cabinet Edge] Dropping Libretro frame with invalid dimensions or pitch.");
+        return;
+    }
+    let Some(source_len) = pitch
+        .checked_mul(height as usize - 1)
+        .and_then(|last_row_start| last_row_start.checked_add(input_row_bytes))
+    else {
         return;
     };
     let source = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), source_len) };
@@ -457,10 +504,32 @@ pub unsafe extern "C" fn video_refresh_callback(
     };
     if let Some(frame_buffer) = target.as_ref() {
         if let Ok(mut frame_buffer) = frame_buffer.lock() {
-            if let Err(error) = frame_buffer.update_video(source, width, height, pitch) {
+            if let Err(error) =
+                frame_buffer.update_video(source, width, height, pitch, pixel_format)
+            {
                 eprintln!("[Cabinet Edge] Dropping invalid Libretro frame: {error}");
             }
         }
+    }
+}
+
+fn pixel_format_to_libretro(format: PixelFormat) -> u32 {
+    match format {
+        PixelFormat::Xrgb8888 => libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_XRGB8888 as u32,
+        PixelFormat::Rgb565 => libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_RGB565 as u32,
+        PixelFormat::Rgb1555 => libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_0RGB1555 as u32,
+    }
+}
+
+fn pixel_format_from_libretro(format: u32) -> Option<PixelFormat> {
+    if format == pixel_format_to_libretro(PixelFormat::Xrgb8888) {
+        Some(PixelFormat::Xrgb8888)
+    } else if format == pixel_format_to_libretro(PixelFormat::Rgb565) {
+        Some(PixelFormat::Rgb565)
+    } else if format == pixel_format_to_libretro(PixelFormat::Rgb1555) {
+        Some(PixelFormat::Rgb1555)
+    } else {
+        None
     }
 }
 
@@ -571,6 +640,43 @@ mod tests {
         assert_eq!(captured.frame_number, 1);
         assert_eq!(&captured.video_buffer[..8], &frame);
         *callback_frame_buffer().lock().unwrap() = None;
+    }
+
+    #[test]
+    fn negotiates_xrgb8888_rgb565_and_0rgb1555_formats() {
+        for (requested, expected) in [
+            (
+                libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_XRGB8888 as u32,
+                PixelFormat::Xrgb8888,
+            ),
+            (
+                libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_RGB565 as u32,
+                PixelFormat::Rgb565,
+            ),
+            (
+                libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_0RGB1555 as u32,
+                PixelFormat::Rgb1555,
+            ),
+        ] {
+            let mut requested = requested;
+            let accepted = unsafe {
+                environment_callback(
+                    libretro::RETRO_ENVIRONMENT_SET_PIXEL_FORMAT,
+                    (&mut requested as *mut u32).cast(),
+                )
+            };
+
+            assert!(accepted);
+            assert_eq!(
+                pixel_format_from_libretro(CALLBACK_PIXEL_FORMAT.load(Ordering::Acquire)),
+                Some(expected)
+            );
+        }
+
+        CALLBACK_PIXEL_FORMAT.store(
+            libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_XRGB8888 as u32,
+            Ordering::Release,
+        );
     }
 
     #[test]
