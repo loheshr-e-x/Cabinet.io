@@ -93,11 +93,15 @@ impl EmulatorInstance {
 
     pub fn load_core(
         core_path: &Path,
+        system_core: &str,
+        rom_key: &str,
+        session_id: &str,
         rom: Vec<u8>,
         input_state: Arc<Mutex<u16>>,
         max_width: u32,
         max_height: u32,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let core_path = resolve_core_path(core_path, system_core)?;
         if rom.is_empty() {
             return Err("cannot load an empty ROM".into());
         }
@@ -108,7 +112,15 @@ impl EmulatorInstance {
             return Err("the edge daemon supports one active Libretro core at a time".into());
         }
 
-        let result = Self::load_core_inner(core_path, rom, input_state, max_width, max_height);
+        let result = Self::load_core_inner(
+            &core_path,
+            rom_key,
+            session_id,
+            rom,
+            input_state,
+            max_width,
+            max_height,
+        );
         if result.is_err() {
             ACTIVE_CORE.store(false, Ordering::Release);
         }
@@ -117,6 +129,8 @@ impl EmulatorInstance {
 
     fn load_core_inner(
         core_path: &Path,
+        rom_key: &str,
+        session_id: &str,
         rom: Vec<u8>,
         input_state: Arc<Mutex<u16>>,
         max_width: u32,
@@ -141,7 +155,8 @@ impl EmulatorInstance {
         let set_input_state =
             unsafe { *library.get::<RetroSetInputState>(b"retro_set_input_state\0")? };
 
-        let virtual_game_path = CString::new("game.nes")?;
+        let extension = rom_file_extension(rom_key)?;
+        let virtual_game_path = CString::new(format!("game.{extension}"))?;
         let mut system_info = libretro::retro_system_info {
             library_name: std::ptr::null(),
             library_version: std::ptr::null(),
@@ -151,7 +166,7 @@ impl EmulatorInstance {
         };
         unsafe { retro_get_system_info(&mut system_info) };
         let temporary_rom_path = if system_info.need_fullpath {
-            Some(write_temporary_rom(&rom)?)
+            Some(write_temporary_rom(&rom, session_id, &extension)?)
         } else {
             None
         };
@@ -344,13 +359,58 @@ impl Drop for EmulatorInstance {
     }
 }
 
-fn write_temporary_rom(rom: &[u8]) -> Result<PathBuf, std::io::Error> {
+fn resolve_core_path(
+    configured_path: &Path,
+    system_core: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let library_name = match system_core.trim().to_ascii_lowercase().as_str() {
+        "fceumm" => "fceumm_libretro.so",
+        "snes9x" => "snes9x_libretro.so",
+        "mgba" => "mgba_libretro.so",
+        core => return Err(format!("unsupported Libretro system core '{core}'").into()),
+    };
+    let core_directory = std::env::var_os("LIBRETRO_CORE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| configured_path.parent().map(Path::to_path_buf))
+        .ok_or("LIBRETRO_CORE_PATH must have a parent directory")?;
+    Ok(core_directory.join(library_name))
+}
+
+fn rom_file_extension(rom_key: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let extension = Path::new(rom_key)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| {
+            !extension.is_empty()
+                && extension
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
+        })
+        .ok_or_else(|| format!("ROM key '{rom_key}' has no valid file extension"))?;
+    Ok(extension.to_ascii_lowercase())
+}
+
+fn write_temporary_rom(
+    rom: &[u8],
+    session_id: &str,
+    extension: &str,
+) -> Result<PathBuf, std::io::Error> {
     let temp_dir = std::env::temp_dir();
+    let safe_session_id = session_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
     for _ in 0..10 {
         let sequence = TEMP_ROM_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let path = temp_dir.join(format!(
-            "cabinet-edge-{}-{sequence}.nes",
-            std::process::id()
+            "cabinet-edge-{safe_session_id}-{}-{sequence}.{extension}",
+            std::process::id(),
         ));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
@@ -544,15 +604,48 @@ mod tests {
     }
 
     #[test]
-    fn writes_fullpath_rom_to_a_nes_named_temporary_file() {
+    fn writes_fullpath_rom_with_the_source_extension_and_session_id() {
         let rom = [1_u8, 2, 3, 4];
-        let path = write_temporary_rom(&rom).unwrap();
+        for extension in ["nes", "sfc", "gba"] {
+            let path = write_temporary_rom(&rom, "session-test", extension).unwrap();
+
+            assert_eq!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some(extension)
+            );
+            assert!(path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("session-test"));
+            assert_eq!(fs::read(&path).unwrap(), rom);
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn selects_core_library_from_system_core() {
+        let configured_path = Path::new("/usr/lib/libretro/fceumm_libretro.so");
 
         assert_eq!(
-            path.extension().and_then(|extension| extension.to_str()),
-            Some("nes")
+            resolve_core_path(configured_path, "fceumm").unwrap(),
+            Path::new("/usr/lib/libretro/fceumm_libretro.so")
         );
-        assert_eq!(fs::read(&path).unwrap(), rom);
-        fs::remove_file(path).unwrap();
+        assert_eq!(
+            resolve_core_path(configured_path, "snes9x").unwrap(),
+            Path::new("/usr/lib/libretro/snes9x_libretro.so")
+        );
+        assert_eq!(
+            resolve_core_path(configured_path, "mgba").unwrap(),
+            Path::new("/usr/lib/libretro/mgba_libretro.so")
+        );
+        assert!(resolve_core_path(configured_path, "unknown").is_err());
+    }
+
+    #[test]
+    fn reads_rom_extension_from_r2_key() {
+        assert_eq!(rom_file_extension("roms/game.sfc").unwrap(), "sfc");
+        assert_eq!(rom_file_extension("roms/game.gba").unwrap(), "gba");
+        assert!(rom_file_extension("roms/game").is_err());
     }
 }

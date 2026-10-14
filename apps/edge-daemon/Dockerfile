@@ -27,16 +27,26 @@ RUN cargo build --locked --release
 FROM debian:bookworm-slim
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
+RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y \
     ca-certificates \
     libvpx7 \
     libssl3 \
+    libretro-snes9x \
+    libretro-mgba \
+    && mkdir -p /usr/lib/libretro \
+    && find -L /usr/lib -name snes9x_libretro.so -exec install -D {} /usr/lib/libretro/snes9x_libretro.so \; \
+    && find -L /usr/lib -name mgba_libretro.so -exec install -D {} /usr/lib/libretro/mgba_libretro.so \; \
+    && test -f /usr/lib/libretro/snes9x_libretro.so \
+    && test -f /usr/lib/libretro/mgba_libretro.so \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/cabinet-edge-daemon /app/edge-daemon
 COPY --from=builder /out/fceumm_libretro.so /usr/lib/libretro/fceumm_libretro.so
 
 ENV LIBRETRO_CORE_PATH=/usr/lib/libretro/fceumm_libretro.so
+ENV LIBRETRO_CORE_DIR=/usr/lib/libretro
 
 EXPOSE 8080
 

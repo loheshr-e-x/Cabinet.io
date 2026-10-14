@@ -113,6 +113,9 @@ async fn handle_connection(stream: TcpStream) -> Result<(), Box<dyn Error + Send
     let input_state = Arc::new(std::sync::Mutex::new(0_u16));
     let emulator = crate::emulator::EmulatorInstance::load_core(
         Path::new(&core_path),
+        &claims.system_core,
+        &claims.rom_key,
+        &claims.session_id,
         rom,
         Arc::clone(&input_state),
         1920,
