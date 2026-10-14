@@ -133,9 +133,15 @@ export function App() {
     token: activeSession?.token ?? null,
     edgeWsUrl: activeSession?.edgeWsUrl ?? null,
   });
-  const setButton = useInputHandler(
+  const {
+    setButton,
+    keybindings,
+    setCustomKeybinding,
+    resetCustomKeybindings,
+  } = useInputHandler(
     dataChannel,
     activeSession?.game.systemCore ?? '',
+    activeSession?.game.title ?? '',
   );
   const sendSaveStateCommand = useCallback(
     (command: 'save_state' | 'load_state') => {
@@ -544,6 +550,9 @@ export function App() {
                 <ControlsInfo
                   systemCore={activeSession.game.systemCore}
                   gameTitle={activeSession.game.title}
+                  keybindings={keybindings}
+                  setCustomKeybinding={setCustomKeybinding}
+                  resetCustomKeybindings={resetCustomKeybindings}
                 />
                 <button
                   className="button button--secondary"
@@ -653,6 +662,7 @@ export function App() {
                       {getControlMappings(
                         activeSession.game.systemCore,
                         activeSession.game.title,
+                        keybindings,
                       )
                         .filter(({ action }) => action)
                         .map(({ button, key, action }) => (

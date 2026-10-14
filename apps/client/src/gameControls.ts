@@ -1,36 +1,86 @@
+export type ControlAction =
+  | 'up'
+  | 'down'
+  | 'left'
+  | 'right'
+  | 'jump'
+  | 'primary'
+  | 'action1'
+  | 'action2'
+  | 'action3'
+  | 'action4'
+  | 'action5'
+  | 'start'
+  | 'select';
+
+export type Keybindings = Record<ControlAction, string>;
+
 export interface ControlMapping {
   button: string;
   key: string;
   action?: string;
+  bindingAction: ControlAction;
 }
 
-const SYSTEM_CONTROLS: Record<string, ControlMapping[]> = {
+export const KEYBINDINGS_STORAGE_KEY = 'cabinet_keybindings';
+
+export const DEFAULT_KEYBINDINGS: Keybindings = {
+  up: 'KeyW',
+  down: 'KeyS',
+  left: 'KeyA',
+  right: 'KeyD',
+  jump: 'Space',
+  primary: 'KeyJ',
+  action1: 'KeyK',
+  action2: 'KeyL',
+  action3: 'Digit1',
+  action4: 'Digit2',
+  action5: 'Digit3',
+  start: 'Enter',
+  select: 'ShiftLeft',
+};
+
+interface SystemControl {
+  button: string;
+  bindingAction: ControlAction;
+}
+
+const SYSTEM_CONTROLS: Record<string, SystemControl[]> = {
   nes: [
-    { button: 'D-Pad', key: 'Arrow Keys' },
-    { button: 'A', key: 'Z' },
-    { button: 'B', key: 'X' },
-    { button: 'Start', key: 'Enter' },
-    { button: 'Select', key: 'Shift' },
+    { button: 'Up', bindingAction: 'up' },
+    { button: 'Down', bindingAction: 'down' },
+    { button: 'Left', bindingAction: 'left' },
+    { button: 'Right', bindingAction: 'right' },
+    { button: 'A', bindingAction: 'primary' },
+    { button: 'B', bindingAction: 'jump' },
+    { button: 'Start', bindingAction: 'start' },
+    { button: 'Select', bindingAction: 'select' },
   ],
   snes: [
-    { button: 'D-Pad', key: 'Arrow Keys' },
-    { button: 'A', key: 'Z' },
-    { button: 'B', key: 'X' },
-    { button: 'Y', key: 'A' },
-    { button: 'X', key: 'S' },
-    { button: 'L', key: 'Q' },
-    { button: 'R', key: 'W' },
-    { button: 'Start', key: 'Enter' },
-    { button: 'Select', key: 'Shift' },
+    { button: 'Up', bindingAction: 'up' },
+    { button: 'Down', bindingAction: 'down' },
+    { button: 'Left', bindingAction: 'left' },
+    { button: 'Right', bindingAction: 'right' },
+    { button: 'A', bindingAction: 'primary' },
+    { button: 'B', bindingAction: 'jump' },
+    { button: 'Y', bindingAction: 'action1' },
+    { button: 'X', bindingAction: 'action2' },
+    { button: 'L', bindingAction: 'action3' },
+    { button: 'R', bindingAction: 'action4' },
+    { button: 'Start', bindingAction: 'start' },
+    { button: 'Select', bindingAction: 'select' },
   ],
   gba: [
-    { button: 'D-Pad', key: 'Arrow Keys' },
-    { button: 'A', key: 'X' },
-    { button: 'B', key: 'Z' },
-    { button: 'L', key: 'Q' },
-    { button: 'R', key: 'W' },
-    { button: 'Start', key: 'Enter' },
-    { button: 'Select', key: 'Shift' },
+    { button: 'Up', bindingAction: 'up' },
+    { button: 'Down', bindingAction: 'down' },
+    { button: 'Left', bindingAction: 'left' },
+    { button: 'Right', bindingAction: 'right' },
+    { button: 'A', bindingAction: 'jump' },
+    { button: 'B', bindingAction: 'primary' },
+    { button: 'L', bindingAction: 'action1' },
+    { button: 'R', bindingAction: 'action2' },
+    { button: 'Start', bindingAction: 'start' },
+    { button: 'Select', bindingAction: 'action5' },
   ],
 };
 
@@ -78,16 +128,59 @@ function getGameActions(
   return {};
 }
 
+function getGameBindingOverrides(
+  systemCore: string,
+  gameTitle: string,
+): Partial<Record<string, ControlAction>> {
+  const title = gameTitle.toLocaleLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  if (
+    getConsole(systemCore) === 'snes' &&
+    title.includes('street fighter ii turbo')
+  ) {
+    return {
+      Y: 'action1',
+      X: 'action2',
+      L: 'action3',
+      B: 'action4',
+      R: 'action5',
+    };
+  }
+  return {};
+}
+
+function formatKeybinding(code: string): string {
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code === 'ShiftLeft' || code === 'ShiftRight') return 'Shift';
+  if (code === 'ControlLeft' || code === 'ControlRight') return 'Ctrl';
+  if (code === 'AltLeft' || code === 'AltRight') return 'Alt';
+  if (code === 'MetaLeft' || code === 'MetaRight') return 'Meta';
+  if (code === 'ArrowUp') return '↑';
+  if (code === 'ArrowDown') return '↓';
+  if (code === 'ArrowLeft') return '←';
+  if (code === 'ArrowRight') return '→';
+  return code;
+}
+
 export function getControlMappings(
   systemCore: string,
   gameTitle: string,
+  keybindings: Keybindings = DEFAULT_KEYBINDINGS,
 ): ControlMapping[] {
   const consoleType = getConsole(systemCore);
   const actions = getGameActions(systemCore, gameTitle);
-  return (SYSTEM_CONTROLS[consoleType] ?? SYSTEM_CONTROLS.nes).map((mapping) => ({
-    ...mapping,
-    ...(actions[mapping.button] ? { action: actions[mapping.button] } : {}),
-  }));
+  const bindingOverrides = getGameBindingOverrides(systemCore, gameTitle);
+  return (SYSTEM_CONTROLS[consoleType] ?? SYSTEM_CONTROLS.nes).map(
+    ({ button, bindingAction: defaultBindingAction }) => {
+      const bindingAction = bindingOverrides[button] ?? defaultBindingAction;
+      return {
+        button,
+        bindingAction,
+        key: formatKeybinding(keybindings[bindingAction]),
+        ...(actions[button] ? { action: actions[button] } : {}),
+      };
+    },
+  );
 }
 
 export function getTouchActionLabel(

@@ -1,9 +1,16 @@
 import { useEffect, useState } from 'react';
-import { getControlMappings } from '../gameControls';
+import {
+  getControlMappings,
+  type ControlAction,
+  type Keybindings,
+} from '../gameControls';
 
 interface ControlsInfoProps {
   systemCore: string;
   gameTitle: string;
+  keybindings: Keybindings;
+  setCustomKeybinding: (action: ControlAction, keycode: string) => void;
+  resetCustomKeybindings: () => void;
 }
 
 function getConsoleName(systemCore: string) {
@@ -37,20 +44,49 @@ function useTouchDevice() {
   return isTouch;
 }
 
-export function ControlsInfo({ systemCore, gameTitle }: ControlsInfoProps) {
+export function ControlsInfo({
+  systemCore,
+  gameTitle,
+  keybindings,
+  setCustomKeybinding,
+  resetCustomKeybindings,
+}: ControlsInfoProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [isCustomizing, setIsCustomizing] = useState(false);
+  const [capturingAction, setCapturingAction] = useState<ControlAction | null>(
+    null,
+  );
   const isTouch = useTouchDevice();
   const consoleType = getConsoleName(systemCore);
-  const buttons = getControlMappings(systemCore, gameTitle);
+  const buttons = getControlMappings(systemCore, gameTitle, keybindings);
 
   useEffect(() => {
     if (!isOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setIsOpen(false);
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+        setCapturingAction(null);
+        setIsCustomizing(false);
+      }
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!capturingAction) return;
+
+    const captureKey = (event: KeyboardEvent) => {
+      if (event.code === 'Unidentified') return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setCustomKeybinding(capturingAction, event.code);
+      setCapturingAction(null);
+    };
+
+    window.addEventListener('keydown', captureKey, true);
+    return () => window.removeEventListener('keydown', captureKey, true);
+  }, [capturingAction, setCustomKeybinding]);
 
   const consoleName =
     consoleType === 'generic' ? 'RETROPAD' : consoleType.toLocaleUpperCase();
@@ -68,7 +104,11 @@ export function ControlsInfo({ systemCore, gameTitle }: ControlsInfoProps) {
         <div
           className="controls-modal-backdrop"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setIsOpen(false);
+            if (event.target === event.currentTarget) {
+              setIsOpen(false);
+              setCapturingAction(null);
+              setIsCustomizing(false);
+            }
           }}
         >
           <section
@@ -80,7 +120,11 @@ export function ControlsInfo({ systemCore, gameTitle }: ControlsInfoProps) {
             <button
               className="controls-modal-close"
               type="button"
-              onClick={() => setIsOpen(false)}
+              onClick={() => {
+                setIsOpen(false);
+                setCapturingAction(null);
+                setIsCustomizing(false);
+              }}
               aria-label="Close controls"
             >
               ×
@@ -90,14 +134,69 @@ export function ControlsInfo({ systemCore, gameTitle }: ControlsInfoProps) {
             <p className="controls-device">
               DEVICE: {isTouch ? 'TOUCHSCREEN' : 'KEYBOARD'}
             </p>
+            <div className="controls-tabs" role="tablist" aria-label="Controls view">
+              <button
+                className="button button--secondary"
+                type="button"
+                role="tab"
+                aria-selected={!isCustomizing}
+                onClick={() => {
+                  setCapturingAction(null);
+                  setIsCustomizing(false);
+                }}
+              >
+                DEFAULT CONTROLS
+              </button>
+              <button
+                className="button button--secondary"
+                type="button"
+                role="tab"
+                aria-selected={isCustomizing}
+                onClick={() => setIsCustomizing(true)}
+              >
+                CUSTOMIZE CONTROLS
+              </button>
+            </div>
             <dl className="controls-list">
-              {buttons.map(({ button, key, action }) => (
+              {buttons.map(({ button, key, action, bindingAction }) => (
                 <div key={button}>
                   <dt>{action ? `${button} · ${action}` : button}</dt>
-                  <dd>{key}</dd>
+                  <dd>
+                    {isCustomizing ? (
+                      <button
+                        className="controls-keybinding"
+                        type="button"
+                        onClick={() => setCapturingAction(bindingAction)}
+                        aria-label={`Rebind ${action ? `${button} ${action}` : button}`}
+                      >
+                        {capturingAction === bindingAction
+                          ? 'Press any key…'
+                          : key}
+                      </button>
+                    ) : (
+                      key
+                    )}
+                  </dd>
                 </div>
               ))}
             </dl>
+            {isCustomizing && (
+              <div className="controls-customize-actions">
+                <p className="controls-touch-note">
+                  Select a binding, then press any key to assign it.
+                </p>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  onClick={() => {
+                    setCapturingAction(null);
+                    resetCustomKeybindings();
+                  }}
+                >
+                  RESET TO DEFAULTS
+                </button>
+              </div>
+            )}
             {isTouch && (
               <p className="controls-touch-note">
                 Touch buttons appear below the game, or over it in fullscreen.

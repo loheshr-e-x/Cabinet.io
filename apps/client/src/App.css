@@ -1412,6 +1412,18 @@
   line-height: 1.5;
 }
 
+.controls-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.controls-tabs .button {
+  flex: 1 1 150px;
+  font-size: 11px;
+}
+
 .controls-list {
   display: grid;
   gap: 8px;
@@ -1436,6 +1448,28 @@
   margin: 0;
   color: #72ffab;
   text-align: right;
+}
+
+.controls-keybinding {
+  padding: 4px 9px;
+  border: 1px solid #55516f;
+  background: rgba(8, 10, 19, 0.8);
+  color: #72ffab;
+  cursor: pointer;
+  font: inherit;
+}
+
+.controls-keybinding:hover,
+.controls-keybinding:focus-visible {
+  border-color: var(--cyan);
+  outline: none;
+  box-shadow: 0 0 10px rgba(32, 231, 247, 0.28);
+}
+
+.controls-customize-actions {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
 }
 
 .stream-placeholder {
