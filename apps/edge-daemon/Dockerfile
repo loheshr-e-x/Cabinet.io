@@ -27,7 +27,7 @@ RUN cargo build --locked --release
 FROM debian:bookworm-slim
 WORKDIR /app
 
-RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources \
+RUN sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y \
     ca-certificates \
